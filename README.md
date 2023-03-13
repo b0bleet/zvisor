@@ -1,4 +1,4 @@
-# zVisor (WIP)
+# zVisor
 
 <p align="center">
     <img  src="/.github/images/linuxboot.png"

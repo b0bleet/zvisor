@@ -1,0 +1,3 @@
+[submodule "qboot"]
+	path = qboot
+	url = git@github.com:bonzini/qboot.git

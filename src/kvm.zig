@@ -527,8 +527,6 @@ pub const Kvm = struct {
             const initrd_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + initrd_addr);
             @memcpy(initrd_area, initrd_data.ptr, initrd_size);
 
-            std.debug.print("initrd_addr in zvisor: {x}\n", .{initrd_addr});
-
             std.mem.writeIntLittle(u32, &header[0x218], initrd_addr);
             std.mem.writeIntLittle(u32, &header[0x21c], initrd_size);
         }
@@ -631,7 +629,6 @@ pub const Kvm = struct {
 
         // Handle TSC frequency for VM
         const freq = try send_ioctl_res(self.vcpufd, KVM_GET_TSC_KHZ, 0);
-        std.debug.print("Freq {x}\n", .{freq});
         try send_ioctl(self.vcpufd, KVM_SET_TSC_KHZ, @intCast(c_ulong, freq));
     }
 

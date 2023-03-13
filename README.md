@@ -1,5 +1,10 @@
 # zVisor (WIP)
 
+<p align="center">
+    <img  src="/.github/images/linuxboot.png"
+      width="800" border="0" alt="zvisor">
+</p>
+
 zVisor is an open-source hypervisor written in the Zig programming language, which provides a modern and efficient approach to systems programming. zVisor leverages the KVM (Kernel-based Virtual Machine) virtualization technology, which is built into the Linux kernel, to provide a lightweight and flexible virtualization solution.
 
 One of the key benefits of zVisor is its use of the Zig programming language. Zig provides a modern and efficient approach to systems programming, with features like memory safety, error handling, and compile-time optimization.

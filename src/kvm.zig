@@ -24,6 +24,7 @@ const kvm_run = c_kvm.kvm_run;
 const kvm_userspace_memory_region = c_kvm.kvm_userspace_memory_region;
 const kvm_cpuid_entry2 = c_kvm.kvm_cpuid_entry2;
 const kvm_pit_config = c_kvm.kvm_pit_config;
+const kvm_lapic_state = c_kvm.kvm_lapic_state;
 
 const KVM_GET_SUPPORTED_CPUID = c_kvm.KVM_GET_SUPPORTED_CPUID;
 const KVM_CREATE_VM = c_kvm.KVM_CREATE_VM;
@@ -45,6 +46,8 @@ const KVM_CHECK_EXTENSION = c_kvm.KVM_CHECK_EXTENSION;
 const KVM_CAP_GET_TSC_KHZ = c_kvm.KVM_CAP_GET_TSC_KHZ;
 const KVM_GET_TSC_KHZ = c_kvm.KVM_GET_TSC_KHZ;
 const KVM_SET_TSC_KHZ = c_kvm.KVM_SET_TSC_KHZ;
+const KVM_GET_LAPIC = c_kvm.KVM_GET_LAPIC;
+const KVM_SET_LAPIC = c_kvm.KVM_SET_LAPIC;
 
 const ZVisorExit = enum {
     Unknown,
@@ -523,7 +526,7 @@ pub const Kvm = struct {
             config_area.initrd_addr = initrd_addr;
             const initrd_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + initrd_addr);
             @memcpy(initrd_area, initrd_data.ptr, initrd_size);
-            
+
             std.debug.print("initrd_addr in zvisor: {x}\n", .{initrd_addr});
 
             std.mem.writeIntLittle(u32, &header[0x218], initrd_addr);
@@ -608,9 +611,7 @@ pub const Kvm = struct {
                     });
                     break :exit_io;
                 },
-                .Mmio => {
-                    std.debug.print("hellll MMIO {x}\n", .{zv_run.u_flds.mmio.phys_addr});
-                },
+                .Mmio => {},
                 else => {
                     std.debug.print("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
                     unreachable;

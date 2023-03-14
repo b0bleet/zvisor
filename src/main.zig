@@ -16,6 +16,7 @@ const help =
     \\-f, --firmware    Firmware file 
     \\-k, --kernel      Kernel file 
     \\-i, --initrd      Initrd file 
+    \\-m, --memory      Memory size 
     \\-v, --version     Show version information and exit
     \\-h, --help        Display this help and exit
 ;
@@ -28,7 +29,8 @@ const Config = struct {
     kernel_empty: bool = true,
     kernel: []u8 = undefined,
     initrd: ?[]u8 = undefined,
-    cmdline: ?[]u8 = null,
+    cmdline: ?[]u8 = undefined,
+    memory: ?[]u8 = undefined,
     err: bool = false,
     err_str: []u8 = undefined,
 };
@@ -108,6 +110,20 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !Config {
             config.cmdline = try allocator.alloc(u8, args[index + 1].len);
             std.mem.copy(u8, config.cmdline.?, args[index + 1]);
             skip = true;
+        } else if (eql(u8, arg, "-m") or eql(u8, arg, "--memory")) {
+            if (index + 1 > args.len - 1) {
+                config.err = true;
+                config.err_str = try std.fmt.allocPrint(
+                    allocator,
+                    "zvisor: option '{s}' requires an argument\n{s}",
+                    .{ arg, help },
+                );
+                return config;
+            }
+
+            config.memory = try allocator.alloc(u8, args[index + 1].len);
+            std.mem.copy(u8, config.memory.?, args[index + 1]);
+            skip = true;
         } else {
             config.err = true;
             config.err_str = try std.fmt.allocPrint(
@@ -152,7 +168,7 @@ pub fn main() anyerror!void {
 
     // Setup Linux based VM context and run that on the VMM
     var vm_ctx = Vm{};
-    vm_ctx.init(allocator, config.firmware) catch |err| switch (err) {
+    vm_ctx.init(allocator, config.firmware, config.memory) catch |err| switch (err) {
         error.FileNotFound => {
             fatal("The specified firmware file could not be found.\n", .{});
         },

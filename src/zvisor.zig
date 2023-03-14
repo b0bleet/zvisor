@@ -10,6 +10,9 @@ const File = fs.File;
 const DeviceControl = io.DeviceControl;
 const IoReqType = io.IoReqType;
 
+const mib_unit = 1024 * 1024;
+const gib_unit = 1024 * 1024 * 1024;
+
 pub const Vm = struct {
     const Self = @This();
 
@@ -25,7 +28,16 @@ pub const Vm = struct {
     /// Allocate memory area for binary file.
     /// Then extract firmware binary file and filling
     /// allocated memory area with that binary file
-    pub fn init(self: *Self, allocator: std.mem.Allocator, fw: []const u8) !void {
+    pub fn init(self: *Self, allocator: std.mem.Allocator, fw: []const u8, mem_size: ?[]const u8) !void {
+        if (mem_size) |size| {
+            const size_val = try std.fmt.parseInt(u64, size[0..size.len-1], 10);
+            const size_as_unit = switch (size[size.len - 1]) {
+                'G' => (size_val * gib_unit),
+                'M' => (size_val * mib_unit),
+                else => unreachable,
+            };
+            self.vm_mem_size = size_as_unit;
+        }
         // Allocate memory for VM with default size
         const vm_mem = try utils.alloc_mem(self.vm_mem_size, null);
         errdefer os.munmap(vm_mem);

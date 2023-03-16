@@ -1,7 +1,7 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const io = @import("io.zig");
-const serial = @import("serial.zig");
+const serial = @import("devices/serial.zig");
 const assert = std.debug.assert;
 const fs = std.fs;
 const os = std.os;
@@ -10,14 +10,24 @@ const File = fs.File;
 const DeviceControl = io.DeviceControl;
 const IoReqType = io.IoReqType;
 
+pub const MsrEntry = struct {
+    index: u32,
+    data: u64,
+};
+
+pub const VcpuState = struct {
+    cpu_id: u32,
+    msrs: std.ArrayList(MsrEntry),
+};
+
 const mib_unit = 1024 * 1024;
 const gib_unit = 1024 * 1024 * 1024;
 
 pub const Vm = struct {
     const Self = @This();
 
-    devctrl: DeviceControl = DeviceControl{},
-    cpus_count: u32 = 0,
+    io_bus: DeviceControl = DeviceControl{},
+    mmio_bus: DeviceControl = DeviceControl{},
     fw_phys_mem_area: u20 = 0xf0000,
     /// Allocated memory region for virtual machine
     vm_mem_ptr: []align(mem.page_size) u8 = undefined,
@@ -28,9 +38,13 @@ pub const Vm = struct {
     /// Allocate memory area for binary file.
     /// Then extract firmware binary file and filling
     /// allocated memory area with that binary file
+    vcpu_state: std.ArrayList(VcpuState),
     pub fn init(self: *Self, allocator: std.mem.Allocator, fw: []const u8, mem_size: ?[]const u8) !void {
         if (mem_size) |size| {
-            const size_val = try std.fmt.parseInt(u64, size[0..size.len-1], 10);
+            const size_val = std.fmt.parseInt(u64, size[0 .. size.len - 1], 10) catch |err| switch (err) {
+                error.InvalidCharacter => @panic("Invalid character for memory size"),
+                else => return err,
+            };
             const size_as_unit = switch (size[size.len - 1]) {
                 'G' => (size_val * gib_unit),
                 'M' => (size_val * mib_unit),
@@ -58,17 +72,31 @@ pub const Vm = struct {
 
     pub fn deinit(self: *Vm) void {
         os.munmap(self.vm_mem_ptr);
-        self.devctrl.deinit();
+        self.io_bus.deinit();
+        self.mmio_bus.deinit();
+
+        // iterate over vcpus and deallocate msr entries
+        for (self.vcpu_state.items) |vcpu| {
+            vcpu.msrs.deinit();
+        }
+        self.vcpu_state.deinit();
     }
 
     pub fn io_req(self: *Self, reqtype: IoReqType, port: u16, data: [*]u8, size: usize) anyerror!void {
-        // Find device by device base address
-        if (self.devctrl.find_dev(port)) |dev| {
-            try self.devctrl.handle_dev(port, dev, reqtype, data, size);
+        if (self.io_bus.find_dev(port)) |dev| {
+            try self.io_bus.handle_dev(port, dev, reqtype, data, size);
         }
     }
 
+    pub fn mmio_req(self: *Self, reqtype: IoReqType, addr: u64, data: [*]u8, len: usize) anyerror!void {
+        if (self.mmio_bus.find_dev(addr)) |dev| {
+            try self.mmio_bus.handle_dev(addr, dev, reqtype, data, len);
+        }
+    }
+
+    // Initialize MMIO and I/O devices through device controller
     fn init_devices(self: *Self, allocator: std.mem.Allocator) anyerror!void {
-        try self.devctrl.init_devs(allocator);
+        try self.io_bus.init_io_devs(allocator);
+        try self.mmio_bus.init_mmio_devs(allocator);
     }
 };

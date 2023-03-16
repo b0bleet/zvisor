@@ -1,5 +1,5 @@
 const std = @import("std");
-const io = @import("io.zig");
+const io = @import("../io.zig");
 const fs = std.fs;
 const Device = io.Device;
 
@@ -109,7 +109,7 @@ pub const SerialDevice = struct {
         }
     }
 
-    fn do_write(self: *@This(), offset: u16, base: u8) anyerror!void {
+    fn do_write(self: *@This(), offset: u64, base: u8) anyerror!void {
         const off = @intCast(u8, offset);
         switch (off) {
             DlabLow...DlabHigh => {
@@ -137,7 +137,7 @@ pub const SerialDevice = struct {
         }
     }
 
-    fn read(ctx: *anyopaque, offset: u16, _: u16, data: []u8) anyerror!void {
+    fn read(ctx: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
         const self = @ptrCast(*SerialDevice, @alignCast(@alignOf(SerialDevice), ctx));
         const off = @intCast(u8, offset);
         data[0] = switch (off) {
@@ -163,7 +163,7 @@ pub const SerialDevice = struct {
             else => 0,
         };
     }
-    fn write(ctx: *anyopaque, offset: u16, _: u16, data: []u8) !void {
+    fn write(ctx: *anyopaque, offset: u64, _: u64, data: []u8) !void {
         const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), ctx));
         try self.do_write(offset, data[0]);
     }

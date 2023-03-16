@@ -166,8 +166,12 @@ pub fn main() anyerror!void {
         std.process.exit(2);
     }
 
+    const cpus = 1;
     // Setup Linux based VM context and run that on the VMM
-    var vm_ctx = Vm{};
+    const vcpu_state = std.ArrayList(vm.VcpuState).initCapacity(allocator, cpus) catch |err| {
+        utils.fatal("Unable to allocate VcpuState: {}", .{err});
+    };
+    var vm_ctx = Vm{ .vcpu_state = vcpu_state };
     vm_ctx.init(allocator, config.firmware, config.memory) catch |err| switch (err) {
         error.FileNotFound => {
             fatal("The specified firmware file could not be found.\n", .{});

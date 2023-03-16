@@ -1,5 +1,5 @@
 const std = @import("std");
-const io = @import("io.zig");
+const io = @import("../io.zig");
 
 const Device = io.Device;
 
@@ -10,7 +10,7 @@ pub const i8042Device = struct {
         return Self{};
     }
 
-    fn read(_: *anyopaque, offset: u16, _: u16, data: []u8) anyerror!void {
+    fn read(_: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
         if (data.len == 1 and offset == 3) {
             data[0] = 0x0;
         } else if (data.len == 1 and offset == 0) {
@@ -18,7 +18,7 @@ pub const i8042Device = struct {
         }
     }
 
-    fn write(_: *anyopaque, _: u16, _: u16, _: []u8) !void {}
+    fn write(_: *anyopaque, _: u64, _: u64, _: []u8) !void {}
 
     pub fn dev(
         self: *@This(),

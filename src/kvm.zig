@@ -260,6 +260,9 @@ pub const Kvm = struct {
         padding: u32 = undefined,
         entries: void = undefined, // should be zero-sized
     };
+    const kvm_state = struct {
+        irq_line: usize,
+    };
 
     vm: *Vm = undefined,
     kvmfd: os.fd_t = undefined,
@@ -268,6 +271,7 @@ pub const Kvm = struct {
     kvm_mmap: []align(mem.page_size) u8 = undefined,
     vcpufd: os.fd_t = undefined,
     allocator: std.mem.Allocator,
+    state: kvm_state = undefined,
 
     pub fn init(self: *Self, vm_ctx: *Vm) !void {
         const flags: u32 = os.O.CLOEXEC | os.O.RDWR | os.O.DSYNC;
@@ -551,7 +555,7 @@ pub const Kvm = struct {
             .type = @enumToInt(e820_types.e820_reserved),
         };
 
-        config_area.cpus_count = self.vm.cpus_count;
+        config_area.cpus_count = @intCast(u32, self.vm.vcpu_state.items.len);
         config_area.kernel_addr = prot_addr;
         config_area.kernel_size = kernel_size;
         config_area.setup_size = setup_size;
@@ -599,17 +603,23 @@ pub const Kvm = struct {
                     break :vm_run;
                 },
                 .Io => exit_io: {
-                    const io_data = @ptrToInt(zv_run) + zv_run.u_flds.io.data_offset;
-                    try self.handle_io_request(.{
-                        .port = zv_run.u_flds.io.port,
-                        .data_offset = io_data,
-                        .count = zv_run.u_flds.io.count,
-                        .direction = zv_run.u_flds.io.direction,
-                        .size = zv_run.u_flds.io.size,
-                    });
+                    const io_data = @intToPtr([*]u8, @ptrToInt(zv_run) + zv_run.u_flds.io.data_offset);
+                    try self.vm.io_req(
+                        @intToEnum(io.IoReqType, zv_run.u_flds.io.direction),
+                        zv_run.u_flds.io.port,
+                        io_data,
+                        (zv_run.u_flds.io.size * zv_run.u_flds.io.count),
+                    );
                     break :exit_io;
                 },
-                .Mmio => {},
+                .Mmio => {
+                    try self.vm.mmio_req(
+                        @intToEnum(io.IoReqType, zv_run.u_flds.mmio.is_write),
+                        zv_run.u_flds.mmio.phys_addr,
+                        &zv_run.u_flds.mmio.data,
+                        zv_run.u_flds.mmio.len,
+                    );
+                },
                 else => {
                     std.debug.print("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
                     unreachable;
@@ -618,7 +628,11 @@ pub const Kvm = struct {
         }
     }
 
-    pub fn setup_pit(self: *Self) !void {
+    fn setup_kapic_regs(_: *Self, kapic: *kvm_lapic_state) void {
+        std.mem.writeIntLittle(u32, @intToPtr(*u8, (@ptrToInt(&kapic.regs) + @as(u8, 0xf << 4))), 0xff);
+    }
+
+    fn setup_interrupt(self: *Self) anyerror!void {
         const pit = mem.zeroes(kvm_pit_config);
         // Create PIT device to emulate Interval Timer
         try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
@@ -626,10 +640,16 @@ pub const Kvm = struct {
         // qBoot initializes APIC in the MP table that's why
         // APIC should be emulated in the zVisor
         try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
+    }
 
+    fn setup_apic(self: *Self) anyerror!void {
         // Handle TSC frequency for VM
         const freq = try send_ioctl_res(self.vcpufd, KVM_GET_TSC_KHZ, 0);
         try send_ioctl(self.vcpufd, KVM_SET_TSC_KHZ, @intCast(c_ulong, freq));
+
+        var kapic = std.mem.zeroes(kvm_lapic_state);
+        self.setup_kapic_regs(&kapic);
+        try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&kapic));
     }
 
     pub fn vm_setup(self: *Self, allocator: std.mem.Allocator, kernel: []u8, initrd: ?[]u8, cmdline: ?[]u8) anyerror!void {
@@ -653,15 +673,21 @@ pub const Kvm = struct {
             fatal("unable to create memory slot for firmware\n", .{});
         };
 
+        self.setup_interrupt() catch |err| {
+            fatal("unable to set-up Interrupt Controller: {}\n", .{err});
+        };
+
         self.vcpufd = try self.create_vcpu();
-        self.vm.cpus_count += 1;
+        const last_vcpu_id = if (self.vm.vcpu_state.getLastOrNull()) |vcpu| vcpu.cpu_id + 1 else 1;
+        try self.vm.vcpu_state.append(zig_vm.VcpuState{
+            .cpu_id = last_vcpu_id,
+            .msrs = std.ArrayList(zig_vm.MsrEntry).init(allocator),
+        });
+
+        try self.setup_apic();
 
         self.setup_vcpu_mem() catch |err| {
             fatal("unable to initialize vcpu memory area: {}", .{err});
-        };
-
-        self.setup_pit() catch |err| {
-            fatal("unable to set-up PIT device: {}\n", .{err});
         };
 
         const initrd_file = if (initrd) |filename| try utils.read_file(allocator, filename) else null;
@@ -670,15 +696,5 @@ pub const Kvm = struct {
         self.setup_linux_boot(kernel_file, initrd_file, cmdline);
         try self.init_fw_regs();
         try self.init_cpuid();
-    }
-
-    fn handle_io_request(self: *Self, io_req: kvm_io_type) !void {
-        const io_data = @intToPtr([*]u8, io_req.data_offset);
-        try self.vm.io_req(
-            @intToEnum(io.IoReqType, io_req.direction),
-            io_req.port,
-            io_data,
-            (io_req.size * io_req.count),
-        );
     }
 };

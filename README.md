@@ -11,7 +11,7 @@ One of the key benefits of zVisor is its use of the Zig programming language. Zi
 
 ## Getting Started
 
-To get started with the hypervisor, you will need to have Zig installed on your system. Once you have Zig installed, you can build the hypervisor using the following commands:
+To get started with the hypervisor, you will need to have Zig (>= 0.11.0) installed on your system. Once you have Zig installed, you can build the hypervisor using the following commands:
 
 ```bash
 git clone https://github.com/b0bleet/zvisor.git
@@ -20,7 +20,7 @@ zig build
 ```
 This will build the hypervisor and create a binary (`./zig-out/bin/zvisor`) that you can use to start the hypervisor.
 
-zVisor uses qboot minimal x86 firmware to boot Linux kernel that's why you have to build qboot before running hypervisor:
+zVisor uses qboot minimal x86 firmware to boot Linux kernel that's why you have to build qboot before running hypervisor. qboot does PCI setup, IDT setup, E820 table extraction, ACPI tables extraction etc.
 ```
 git clone https://github.com/b0bleet/qboot
 meson build && ninja -C build

@@ -2,7 +2,13 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const io = @import("io.zig");
 const serial = @import("devices/serial.zig");
+const kvm = @import("kvm.zig");
+const Config = @import("root").Config;
+const interrupt = @import("interrupt.zig");
+const c_kvm = @import("root").c_kvm;
+
 const assert = std.debug.assert;
+const fatal = utils.fatal;
 const fs = std.fs;
 const os = std.os;
 const mem = std.mem;
@@ -23,6 +29,23 @@ pub const VcpuState = struct {
 const mib_unit = 1024 * 1024;
 const gib_unit = 1024 * 1024 * 1024;
 
+const AccelVTable = struct {
+    get_klapic: *const fn (*anyopaque) anyerror!LapicState,
+    get_klapic_reg: *const fn (*anyopaque, *LapicState, u32) u32,
+    set_klapic_reg: *const fn (*anyopaque, *LapicState, u32, u32) void,
+    set_klapic: *const fn (*anyopaque, *LapicState) anyerror!void,
+};
+
+pub const Accel = struct {
+    ptr: *anyopaque,
+    vtable: *const AccelVTable = undefined,
+};
+
+pub const LapicState = union {
+    kvm_lapic: c_kvm.kvm_lapic_state,
+    wth: u32,
+};
+
 pub const Vm = struct {
     const Self = @This();
 
@@ -39,7 +62,10 @@ pub const Vm = struct {
     /// Then extract firmware binary file and filling
     /// allocated memory area with that binary file
     vcpu_state: std.ArrayList(VcpuState),
-    pub fn init(self: *Self, allocator: std.mem.Allocator, fw: []const u8, mem_size: ?[]const u8) !void {
+    pub fn init(self: *Self, allocator: std.mem.Allocator, config: Config) !void {
+        const fw = config.firmware;
+        const mem_size = config.memory;
+
         if (mem_size) |size| {
             const size_val = std.fmt.parseInt(u64, size[0 .. size.len - 1], 10) catch |err| switch (err) {
                 error.InvalidCharacter => @panic("Invalid character for memory size"),
@@ -67,6 +93,25 @@ pub const Vm = struct {
         // Set up `Devices` object and initalize all PCI buses
         self.init_devices(allocator) catch |err| {
             utils.fatal("unable to initialize PCI devices: {}\n", .{err});
+        };
+        // Initialize VM accelerator
+        // At the moment KVM will be used by default
+        // Initialize KVM context
+        var kvm_ctx = kvm.Kvm.init(allocator, self) catch |err| {
+            fatal("unable to initialize kvm context: {}", .{err});
+        };
+        defer kvm_ctx.deinit();
+
+        const accel = kvm_ctx.get_accel();
+
+        kvm_ctx.setup_vm(allocator, config.kernel, config.initrd, config.cmdline) catch |err| {
+            fatal("unable to run accelerator: {}", .{err});
+        };
+
+        try interrupt.set_lint(&accel);
+
+        kvm_ctx.run_vm() catch |err| {
+            fatal("unable to run VM with KVM accelerator: {}", .{err});
         };
     }
 

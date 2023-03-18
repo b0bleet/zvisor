@@ -1,7 +1,10 @@
 const std = @import("std");
-const kvm = @import("kvm.zig");
 const vm = @import("zvisor.zig");
 const utils = @import("utils.zig");
+pub const c_kvm = @cImport({
+    @cInclude("linux/kvm.h");
+    @cInclude("linux/kvm_para.h");
+});
 const fatal = utils.fatal;
 const eql = std.mem.eql;
 const heap = std.heap;
@@ -21,7 +24,7 @@ const help =
     \\-h, --help        Display this help and exit
 ;
 
-const Config = struct {
+pub const Config = struct {
     help: bool = false,
     version: bool = false,
     fw_empty: bool = true,
@@ -172,27 +175,13 @@ pub fn main() anyerror!void {
         utils.fatal("Unable to allocate VcpuState: {}", .{err});
     };
     var vm_ctx = Vm{ .vcpu_state = vcpu_state };
-    vm_ctx.init(allocator, config.firmware, config.memory) catch |err| switch (err) {
+    vm_ctx.init(allocator, config) catch |err| switch (err) {
         error.FileNotFound => {
             fatal("The specified firmware file could not be found.\n", .{});
         },
         else => fatal("unable to initialize vm context: {}", .{err}),
     };
     defer vm_ctx.deinit();
-
-    // Initialize VM accelerator
-    // At the moment KVM will be used by default
-    var kvm_ctx = kvm.Kvm{ .allocator = allocator };
-    // Initialize KVM context
-    kvm_ctx.init(&vm_ctx) catch |err| {
-        fatal("unable to initialize kvm context: {}", .{err});
-    };
-    defer kvm_ctx.deinit();
-    // Initialize VM setup that depends on OS (linux, win32, bsd)
-    kvm_ctx.vm_setup(allocator, config.kernel, config.initrd, config.cmdline) catch |err| {
-        fatal("unable to setup accelerator: {}", .{err});
-    };
-    _ = try kvm_ctx.run_vm();
 }
 
 test "simple test" {}

@@ -1,17 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const os = std.os;
-const c_kvm = @cImport({
-    @cInclude("linux/kvm.h");
-    @cInclude("linux/kvm_para.h");
-});
+const c_kvm = @import("root").c_kvm;
 const utils = @import("utils.zig");
 const io = @import("io.zig");
 const zig_vm = @import("zvisor.zig");
-const Vm = zig_vm.Vm;
 const fatal = utils.fatal;
 const mem = std.mem;
 const assert = std.debug.assert;
+
+const Vm = zig_vm.Vm;
+const Accel = zig_vm.Accel;
+const LapicState = zig_vm.LapicState;
 
 // Utils API
 const send_ioctl_res = utils.send_ioctl_res;
@@ -25,6 +25,7 @@ const kvm_userspace_memory_region = c_kvm.kvm_userspace_memory_region;
 const kvm_cpuid_entry2 = c_kvm.kvm_cpuid_entry2;
 const kvm_pit_config = c_kvm.kvm_pit_config;
 const kvm_lapic_state = c_kvm.kvm_lapic_state;
+const kvm_irq_level = c_kvm.kvm_irq_level;
 
 const KVM_GET_SUPPORTED_CPUID = c_kvm.KVM_GET_SUPPORTED_CPUID;
 const KVM_CREATE_VM = c_kvm.KVM_CREATE_VM;
@@ -48,6 +49,7 @@ const KVM_GET_TSC_KHZ = c_kvm.KVM_GET_TSC_KHZ;
 const KVM_SET_TSC_KHZ = c_kvm.KVM_SET_TSC_KHZ;
 const KVM_GET_LAPIC = c_kvm.KVM_GET_LAPIC;
 const KVM_SET_LAPIC = c_kvm.KVM_SET_LAPIC;
+const KVM_IRQ_LINE = c_kvm.KVM_IRQ_LINE;
 
 const ZVisorExit = enum {
     Unknown,
@@ -265,21 +267,24 @@ pub const Kvm = struct {
     };
 
     vm: *Vm = undefined,
-    kvmfd: os.fd_t = undefined,
-    vmfd: c_int = undefined,
+    kvmfd: os.fd_t,
+    vmfd: c_int,
     run: *kvm_run = undefined,
-    kvm_mmap: []align(mem.page_size) u8 = undefined,
-    vcpufd: os.fd_t = undefined,
+    kvm_mmap: []align(mem.page_size) u8,
+    vcpufd: os.fd_t,
     allocator: std.mem.Allocator,
-    state: kvm_state = undefined,
+    state: kvm_state,
 
-    pub fn init(self: *Self, vm_ctx: *Vm) !void {
+    pub fn init(allocator: std.mem.Allocator, vm_ctx: *Vm) anyerror!Kvm {
         const flags: u32 = os.O.CLOEXEC | os.O.RDWR | os.O.DSYNC;
         var mode: os.mode_t = 0;
         const fd = try os.open("/dev/kvm", flags, mode);
         errdefer os.close(fd);
-        self.kvmfd = fd;
-        self.vm = vm_ctx;
+        return std.mem.zeroInit(Kvm, .{
+            .allocator = allocator,
+            .kvmfd = fd,
+            .vm = vm_ctx,
+        });
     }
 
     pub fn deinit(self: *Self) void {
@@ -628,8 +633,24 @@ pub const Kvm = struct {
         }
     }
 
-    fn setup_kapic_regs(_: *Self, kapic: *kvm_lapic_state) void {
-        std.mem.writeIntLittle(u32, @intToPtr(*u8, (@ptrToInt(&kapic.regs) + @as(u8, 0xf << 4))), 0xff);
+    fn get_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32) u32 {
+        return std.mem.readIntLittle(u32, @intToPtr(
+            *u8,
+            (@ptrToInt(&lapic_state.kvm_lapic.regs) + @as(u32, reg << 4)),
+        ));
+    }
+
+    fn set_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32, val: u32) void {
+        std.mem.writeIntLittle(
+            u32,
+            @intToPtr(*u8, (@ptrToInt(&lapic_state.kvm_lapic.regs) + @as(u32, reg << 4))),
+            val,
+        );
+    }
+
+    fn set_klapic(ctx: *anyopaque, lapic_state: *LapicState) anyerror!void {
+        const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
+        try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
     }
 
     fn setup_interrupt(self: *Self) anyerror!void {
@@ -640,19 +661,39 @@ pub const Kvm = struct {
         // qBoot initializes APIC in the MP table that's why
         // APIC should be emulated in the zVisor
         try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
-    }
 
-    fn setup_apic(self: *Self) anyerror!void {
-        // Handle TSC frequency for VM
         const freq = try send_ioctl_res(self.vcpufd, KVM_GET_TSC_KHZ, 0);
         try send_ioctl(self.vcpufd, KVM_SET_TSC_KHZ, @intCast(c_ulong, freq));
-
-        var kapic = std.mem.zeroes(kvm_lapic_state);
-        self.setup_kapic_regs(&kapic);
-        try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&kapic));
     }
 
-    pub fn vm_setup(self: *Self, allocator: std.mem.Allocator, kernel: []u8, initrd: ?[]u8, cmdline: ?[]u8) anyerror!void {
+    pub fn get_klapic(ctx: *anyopaque) !LapicState {
+        const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
+        var lapic_state = LapicState{ .kvm_lapic = std.mem.zeroes(kvm_lapic_state) };
+        try send_ioctl(self.vcpufd, KVM_GET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
+        return lapic_state;
+    }
+
+    pub fn set_irq(self: *Self, irq: u32, level: bool) void {
+        const event = std.mem.zeroes(kvm_irq_level);
+
+        event.level = level;
+        event.irq = irq;
+        try send_ioctl(self.vcpufd, KVM_IRQ_LINE, &event);
+    }
+
+    pub fn get_accel(self: *Self) Accel {
+        return Accel{
+            .ptr = self,
+            .vtable = &.{
+                .get_klapic = get_klapic,
+                .get_klapic_reg = get_klapic_reg,
+                .set_klapic_reg = set_klapic_reg,
+                .set_klapic = set_klapic,
+            },
+        };
+    }
+
+    pub fn setup_vm(self: *Self, allocator: std.mem.Allocator, kernel: []u8, initrd: ?[]u8, cmdline: ?[]u8) anyerror!void {
         self.vmfd = try self.create_vm();
         self.add_mem_slot(.{
             .slot = 0,
@@ -683,8 +724,6 @@ pub const Kvm = struct {
             .cpu_id = last_vcpu_id,
             .msrs = std.ArrayList(zig_vm.MsrEntry).init(allocator),
         });
-
-        try self.setup_apic();
 
         self.setup_vcpu_mem() catch |err| {
             fatal("unable to initialize vcpu memory area: {}", .{err});

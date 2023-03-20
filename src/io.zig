@@ -3,6 +3,8 @@ const utils = @import("utils.zig");
 const serial = @import("devices/serial.zig");
 const i8042dev = @import("devices/i8042.zig");
 const interrupt_controller = @import("devices/interrupt_controller.zig");
+const interrupt = @import("interrupt.zig");
+const InterruptManager = interrupt.InterruptManager;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
@@ -26,6 +28,7 @@ pub const Device = struct {
     base: u64,
     size: u64,
 
+    deinit: ?*const fn (*anyopaque) void,
     ptr: *anyopaque,
     vtable: *const VTable = undefined,
 };
@@ -36,15 +39,18 @@ pub const DeviceControl = struct {
     bus: std.ArrayList(Device) = undefined,
     devices_count_max: u16 = 0xffff,
     allocator: std.mem.Allocator = undefined,
-    pub fn init_io_devs(self: *Self, allocator: std.mem.Allocator) anyerror!void {
+    pub fn init_io_devs(self: *Self, allocator: std.mem.Allocator, intr_manager: *InterruptManager) anyerror!void {
         self.allocator = allocator;
         self.bus = try std.ArrayList(Device).initCapacity(allocator, self.devices_count_max);
+        errdefer self.bus.deinit();
 
         var serial_dev = allocator.create(SerialDevice) catch |err| return err;
-        serial_dev.* = serial.SerialDevice.init(allocator);
+        errdefer allocator.destroy(serial_dev);
+        serial_dev.* = serial.SerialDevice.init(allocator, intr_manager);
         try self.add_dev(serial_dev.dev());
 
         var i8042_dev = allocator.create(i8042Device) catch |err| return err;
+        errdefer allocator.destroy(i8042_dev);
         i8042_dev.* = i8042Device.init();
         try self.add_dev(i8042_dev.dev());
     }
@@ -52,8 +58,10 @@ pub const DeviceControl = struct {
     pub fn init_mmio_devs(self: *Self, allocator: std.mem.Allocator) anyerror!void {
         self.allocator = allocator;
         self.bus = try std.ArrayList(Device).initCapacity(allocator, self.devices_count_max);
+        errdefer self.bus.deinit();
 
         var intr_dev = allocator.create(InterruptController) catch |err| return err;
+        errdefer allocator.destroy(intr_dev);
         intr_dev.* = interrupt_controller.InterruptController.init(interrupt_controller.APIC_START);
         try self.add_dev(intr_dev.dev());
     }
@@ -88,6 +96,7 @@ pub const DeviceControl = struct {
 
     pub fn deinit(self: *Self) void {
         for (self.bus.items) |*dev| {
+            if (dev.deinit) |destroy| destroy(dev.ptr);
             self.allocator.destroy(dev);
         }
         self.bus.deinit();

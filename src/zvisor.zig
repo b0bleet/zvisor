@@ -15,6 +15,7 @@ const mem = std.mem;
 const File = fs.File;
 const DeviceControl = io.DeviceControl;
 const IoReqType = io.IoReqType;
+const InterruptManager = interrupt.InterruptManager;
 
 pub const MsrEntry = struct {
     index: u32,
@@ -46,11 +47,91 @@ pub const LapicState = union {
     wth: u32,
 };
 
+const ZvCpuid = struct {
+    const Self = @This();
+
+    const CpuidRegs = enum {
+        Eax,
+        Ebx,
+        Ecx,
+        Edx,
+    };
+
+    pub const Cpuid = struct {
+        Function: u32,
+        Index: u32,
+        Flags: u32,
+        Eax: u32,
+        Ebx: u32,
+        Ecx: u32,
+        Edx: u32,
+    };
+
+    cpuids: std.ArrayList(Cpuid),
+    pub fn init(allocator: std.mem.Allocator) Self {
+        const cpuids_list = std.ArrayList(Cpuid).init(allocator);
+        errdefer cpuids_list.deinit();
+
+        return Self{
+            .cpuids = cpuids_list,
+        };
+    }
+
+    pub fn set_reg(self: *Self, reg: CpuidRegs, function: u32, val: u32) !void {
+        var found = false;
+
+        if (self.cpuids.items.len != 0) {
+            for (self.cpuids.items) |*entries| {
+                if (entries.Function == function) {
+                    found = true;
+                    switch (reg) {
+                        .Eax => entries.Eax = val,
+                        .Ebx => entries.Ebx = val,
+                        .Ecx => entries.Ecx = val,
+                        .Edx => entries.Edx = val,
+                    }
+                }
+            }
+        }
+
+        if (!found) {
+            var cpuid = std.mem.zeroInit(Cpuid, .{ .Function = function });
+            switch (reg) {
+                .Eax => cpuid.Eax = val,
+                .Ebx => cpuid.Ebx = val,
+                .Ecx => cpuid.Ecx = val,
+                .Edx => cpuid.Edx = val,
+            }
+            try self.cpuids.append(cpuid);
+        }
+    }
+
+    pub fn set_regs(self: *Self, reg: Cpuid) !void {
+        // if cpuid does exist remove then
+        if (self.cpuids.items.len != 0) {
+            var i: u32 = 0;
+            for (self.cpuids.items) |entries| {
+                if (entries.Function == reg.Function) {
+                    _ = self.cpuids.orderedRemove(i);
+                }
+                i += 1;
+            }
+        }
+
+        try self.cpuids.append(reg);
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.cpuids.deinit();
+    }
+};
+
 pub const Vm = struct {
     const Self = @This();
 
     io_bus: DeviceControl = DeviceControl{},
     mmio_bus: DeviceControl = DeviceControl{},
+    intr_manager: *interrupt.InterruptManager = undefined,
     fw_phys_mem_area: u20 = 0xf0000,
     /// Allocated memory region for virtual machine
     vm_mem_ptr: []align(mem.page_size) u8 = undefined,
@@ -90,10 +171,9 @@ pub const Vm = struct {
 
         // Set up VM context for virtualization module (KVM, WHVP)
         self.vm_mem_ptr = vm_mem;
-        // Set up `Devices` object and initalize all PCI buses
-        self.init_devices(allocator) catch |err| {
-            utils.fatal("unable to initialize PCI devices: {}\n", .{err});
-        };
+    }
+
+    pub fn run_vm(self: *@This(), allocator: std.mem.Allocator, config: Config) anyerror!void {
         // Initialize VM accelerator
         // At the moment KVM will be used by default
         // Initialize KVM context
@@ -102,13 +182,22 @@ pub const Vm = struct {
         };
         defer kvm_ctx.deinit();
 
-        const accel = kvm_ctx.get_accel();
-
         kvm_ctx.setup_vm(allocator, config.kernel, config.initrd, config.cmdline) catch |err| {
             fatal("unable to run accelerator: {}", .{err});
         };
 
+        const accel = kvm_ctx.get_accel();
+
         try interrupt.set_lint(&accel);
+        try self.prep_cpuid(allocator);
+
+        self.intr_manager = try interrupt.InterruptManager.init(&accel, allocator);
+        errdefer allocator.destroy(self.intr_manager);
+
+        // Set up `Devices` object and initalize all PCI buses
+        self.init_devices(allocator) catch |err| {
+            utils.fatal("unable to initialize PCI devices: {}\n", .{err});
+        };
 
         kvm_ctx.run_vm() catch |err| {
             fatal("unable to run VM with KVM accelerator: {}", .{err});
@@ -119,10 +208,13 @@ pub const Vm = struct {
         os.munmap(self.vm_mem_ptr);
         self.io_bus.deinit();
         self.mmio_bus.deinit();
+        self.intr_manager.deinit();
 
         // iterate over vcpus and deallocate msr entries
-        for (self.vcpu_state.items) |vcpu| {
-            vcpu.msrs.deinit();
+        if (self.vcpu_state.items.len != 0) {
+            for (self.vcpu_state.items) |vcpu| {
+                vcpu.msrs.deinit();
+            }
         }
         self.vcpu_state.deinit();
     }
@@ -141,7 +233,20 @@ pub const Vm = struct {
 
     // Initialize MMIO and I/O devices through device controller
     fn init_devices(self: *Self, allocator: std.mem.Allocator) anyerror!void {
-        try self.io_bus.init_io_devs(allocator);
+        try self.io_bus.init_io_devs(allocator, self.intr_manager);
         try self.mmio_bus.init_mmio_devs(allocator);
+    }
+
+    fn prep_cpuid(_: *Self, allocator: std.mem.Allocator) anyerror!void {
+        var zvcpuids = ZvCpuid.init(allocator);
+        defer zvcpuids.deinit();
+
+        try zvcpuids.set_regs(std.mem.zeroInit(ZvCpuid.Cpuid, .{
+            .Function = 0x0,
+            .Eax = 0x1b,
+            .Ebx = 0x756e6547,
+            .Ecx = 0x06c65746e,
+            .Edx = 0x49656e69,
+        }));
     }
 };

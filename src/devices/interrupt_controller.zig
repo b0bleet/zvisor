@@ -19,6 +19,7 @@ pub const InterruptController = struct {
         self: *@This(),
     ) Device {
         return Device{
+            .deinit = null,
             .base = IOAPIC_START,
             .size = (IOAPIC_START + IOAPIC_SIZE),
             .ptr = self,

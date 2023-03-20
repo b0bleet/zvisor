@@ -181,6 +181,10 @@ pub fn main() anyerror!void {
         },
         else => fatal("unable to initialize vm context: {}", .{err}),
     };
+    vm_ctx.run_vm(allocator, config) catch |err| {
+        fatal("unable to run vm: {}\n", .{err});
+    };
+
     defer vm_ctx.deinit();
 }
 

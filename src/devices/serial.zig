@@ -1,9 +1,10 @@
 const std = @import("std");
 const io = @import("../io.zig");
+const interrupt = @import("../interrupt.zig");
 const fs = std.fs;
-const Device = io.Device;
+const stdout = std.io.getStdOut().writer();
 
-const LoopSize = 0x40;
+const Device = io.Device;
 
 const Data: u8 = 0;
 const Ier: u8 = 1;
@@ -41,6 +42,8 @@ const DlabHigh: u8 = 1;
 
 const McrLoopBit: u8 = 0x10;
 
+const LoopSize = 0x40;
+
 var m = std.Thread.Mutex{};
 
 pub const SerialDevice = struct {
@@ -55,8 +58,9 @@ pub const SerialDevice = struct {
     baud_divisor: u16,
     in_buf: std.ArrayList(u8),
     out: fs.File.Writer,
+    interrupt: *interrupt.InterruptManager,
 
-    pub fn init(allocator: std.mem.Allocator) SerialDevice {
+    pub fn init(allocator: std.mem.Allocator, intr_manager: *interrupt.InterruptManager) SerialDevice {
         return SerialDevice{
             .id = "serial",
             .intr_active = 0,
@@ -69,6 +73,7 @@ pub const SerialDevice = struct {
             .baud_divisor = BaudDivisor,
             .in_buf = std.ArrayList(u8).init(allocator),
             .out = std.io.getStdOut().writer(),
+            .interrupt = intr_manager,
         };
     }
 
@@ -76,6 +81,7 @@ pub const SerialDevice = struct {
         self: *@This(),
     ) Device {
         return Device{
+            .deinit = deinit,
             .base = 0x3f8,
             .size = 0x400,
             .ptr = self,
@@ -94,23 +100,50 @@ pub const SerialDevice = struct {
         return (self.modem_control & McrLoopBit) != 0;
     }
 
-    fn thr_intr_enabled(self: *@This()) bool {
+    fn is_thr_intr_activated(self: *@This()) bool {
         return (self.intr_active & IerThrBit) != 0;
     }
 
-    fn add_intr_bit(self: *@This(), bit: u8) void {
-        self.intr_identify &= @boolToInt(!@bitCast(bool, @truncate(u1, IirNoneBit)));
-        self.intr_identify |= bit;
+    fn is_recv_intr_activated(self: *@This()) bool {
+        return (self.intr_active & IerRecvBit) != 0;
     }
 
     fn thr_empty(self: *@This()) void {
-        if (self.thr_intr_enabled()) {
-            self.add_intr_bit(IirThrBit);
+        if (self.is_thr_intr_activated()) {
+            self.mod_intr_bit(IirThrBit);
+            self.trigger_interrupt();
         }
     }
 
-    fn do_write(self: *@This(), offset: u64, base: u8) anyerror!void {
-        const off = @intCast(u8, offset);
+    fn iir_reset(self: *@This()) void {
+        self.intr_identify = InterruptIdentification;
+    }
+
+    fn mod_intr_bit(self: *@This(), bit: u8) void {
+        self.intr_identify &= ~IirNoneBit;
+        self.intr_identify |= bit;
+    }
+
+    fn clear_intr_bit(self: *@This(), bit: u8) void {
+        self.intr_identify &= ~bit;
+        if (self.intr_identify == 0x0) {
+            self.intr_identify = IirNoneBit;
+        }
+    }
+
+    fn recv_data(self: *@This()) void {
+        if (self.is_recv_intr_activated()) {
+            self.mod_intr_bit(IirRecvBit);
+            self.trigger_interrupt();
+        }
+        self.line_status |= LsrDataBit;
+    }
+
+    fn trigger_interrupt(_: *@This()) void {
+        std.debug.print("hell yeah\n", .{});
+    }
+
+    fn do_write(self: *@This(), off: u8, base: u8) anyerror!void {
         switch (off) {
             DlabLow...DlabHigh => {
                 if (off == DlabLow and self.dlab_set()) {
@@ -121,6 +154,7 @@ pub const SerialDevice = struct {
                     if (self.modem_ctrl_loop()) {
                         if (self.in_buf.items.len < LoopSize) {
                             try self.in_buf.append(base);
+                            self.recv_data();
                         }
                     } else {
                         try self.out.writeAll(&[_]u8{base});
@@ -139,20 +173,25 @@ pub const SerialDevice = struct {
 
     fn read(ctx: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
         const self = @ptrCast(*SerialDevice, @alignCast(@alignOf(SerialDevice), ctx));
-        const off = @intCast(u8, offset);
+        const off = @truncate(u8, offset);
         data[0] = switch (off) {
             DlabLow...DlabHigh => dlab: {
                 if (off == DlabLow and self.dlab_set()) {
-                    break :dlab @intCast(u8, self.baud_divisor);
+                    break :dlab @truncate(u8, self.baud_divisor);
                 } else if (off == DlabHigh and self.dlab_set()) {
-                    break :dlab @intCast(u8, self.baud_divisor >> 8);
+                    break :dlab @truncate(u8, self.baud_divisor >> 8);
                 } else if (off == Data) {
+                    self.clear_intr_bit(IirRecvBit);
                     if (self.in_buf.items.len <= 1) {
-                        self.line_status &= @boolToInt(!@bitCast(bool, @truncate(u1, LsrDataBit)));
+                        self.line_status &= ~LsrDataBit;
                     }
-                    _ = self.in_buf.pop();
+                    break :dlab 0x0;
+                } else if (off == Iir) {
+                    const i = self.intr_identify | IirFifoBits;
+                    self.iir_reset();
+                    break :dlab i;
                 } else if (off == Ier) {
-                    break :dlab self.intr_identify;
+                    break :dlab self.intr_active;
                 }
             },
             Lcr => self.line_control,
@@ -163,8 +202,14 @@ pub const SerialDevice = struct {
             else => 0,
         };
     }
+
     fn write(ctx: *anyopaque, offset: u64, _: u64, data: []u8) !void {
         const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), ctx));
-        try self.do_write(offset, data[0]);
+        try self.do_write(@truncate(u8, offset), data[0]);
+    }
+
+    fn deinit(ctx: *anyopaque) void {
+        const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), ctx));
+        self.in_buf.deinit();
     }
 };

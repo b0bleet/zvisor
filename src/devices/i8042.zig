@@ -24,6 +24,7 @@ pub const i8042Device = struct {
         self: *@This(),
     ) Device {
         return Device{
+            .deinit = null,
             .base = 0x61,
             .size = 0x65,
             .ptr = self,

@@ -36,4 +36,4 @@ Here's an example command to run a virtual machine with 2GB of memory:
                       --initrd ./initrd \
                       --memory 1G
 ```
-noapic should be passed because at the moment zVisor does support in-kernel PIC emulation 
+`noapic` option should be passed because, at the moment, zVisor only supports in-kernel PIC emulation.

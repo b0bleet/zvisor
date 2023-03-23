@@ -55,7 +55,7 @@ var m = std.Thread.Mutex{};
 
 pub const SerialDevice = struct {
     id: []const u8,
-    intr_active: u8,
+    intr_enable: u8,
     intr_identify: u8,
     line_control: u8,
     line_status: u8,
@@ -71,7 +71,7 @@ pub const SerialDevice = struct {
     pub fn init(allocator: std.mem.Allocator, intr_manager: *interrupt.InterruptManager) SerialDevice {
         return SerialDevice{
             .id = "serial",
-            .intr_active = 0,
+            .intr_enable = 0,
             .intr_identify = InterruptIdentification,
             .line_control = LineControl,
             .line_status = LineStatus,
@@ -109,18 +109,18 @@ pub const SerialDevice = struct {
         return (self.modem_control & McrLoopBit) != 0;
     }
 
-    fn is_thr_intr_activated(self: *@This()) bool {
-        return (self.intr_active & IerThrBit) != 0;
+    fn is_thr_intr_enabled(self: *@This()) bool {
+        return (self.intr_enable & IerThrBit) != 0;
     }
 
-    fn is_recv_intr_activated(self: *@This()) bool {
-        return (self.intr_active & IerRecvBit) != 0;
+    fn is_recv_intr_enabled(self: *@This()) bool {
+        return (self.intr_enable & IerRecvBit) != 0;
     }
 
     fn thr_empty(self: *@This()) !void {
-        if (self.is_thr_intr_activated()) {
-            self.mod_intr_bit(IirThrBit);
-            try self.trigger_interrupt();
+        if (self.is_thr_intr_enabled()) {
+            self.mod_intr_id_bit(IirThrBit);
+            try self.trigger_interrupt(1);
         }
     }
 
@@ -128,7 +128,7 @@ pub const SerialDevice = struct {
         self.intr_identify = InterruptIdentification;
     }
 
-    fn mod_intr_bit(self: *@This(), bit: u8) void {
+    fn mod_intr_id_bit(self: *@This(), bit: u8) void {
         self.intr_identify &= ~IirNoneBit;
         self.intr_identify |= bit;
     }
@@ -141,15 +141,22 @@ pub const SerialDevice = struct {
     }
 
     fn recv_data(self: *@This()) !void {
-        if (self.is_recv_intr_activated()) {
-            self.mod_intr_bit(IirRecvBit);
-            try self.trigger_interrupt();
+        if (self.is_recv_intr_enabled()) {
+            self.mod_intr_id_bit(IirRecvBit);
+            try self.trigger_interrupt(1);
         }
         self.line_status |= LsrDataBit;
     }
 
-    fn trigger_interrupt(self: *@This()) anyerror!void {
-        try self.interrupt.trigger(self.irq, 0);
+    fn update_irq(self: *@This()) !void {
+        if (!self.is_thr_intr_enabled() and (self.intr_identify & IirThrBit) != 0) {
+            self.iir_reset();
+            try self.trigger_interrupt(0);
+        }
+    }
+
+    fn trigger_interrupt(self: *@This(), level: u8) anyerror!void {
+        try self.interrupt.trigger(self.irq, level);
     }
 
     fn do_write(self: *@This(), off: u8, base: u8) anyerror!void {
@@ -170,7 +177,7 @@ pub const SerialDevice = struct {
                         try self.thr_empty();
                     }
                 } else if (off == Ier) {
-                    self.intr_active = base & IerFifoBits;
+                    self.intr_enable = base & IerFifoBits;
                 }
             },
             Lcr => self.line_control = base,
@@ -178,6 +185,7 @@ pub const SerialDevice = struct {
             Scr => self.scratch = base,
             else => {},
         }
+        try self.update_irq();
     }
 
     fn read(ctx: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
@@ -196,7 +204,7 @@ pub const SerialDevice = struct {
                     }
                     break :dlab if (self.in_buf.popOrNull()) |val| val else 0;
                 } else if (off == Ier) {
-                    break :dlab self.intr_active;
+                    break :dlab self.intr_enable;
                 }
             },
             Iir => iirblk: {

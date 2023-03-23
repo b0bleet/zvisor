@@ -50,6 +50,8 @@ const KVM_SET_TSC_KHZ = c_kvm.KVM_SET_TSC_KHZ;
 const KVM_GET_LAPIC = c_kvm.KVM_GET_LAPIC;
 const KVM_SET_LAPIC = c_kvm.KVM_SET_LAPIC;
 const KVM_IRQ_LINE = c_kvm.KVM_IRQ_LINE;
+const KVM_IRQ_LINE_STATUS = c_kvm.KVM_IRQ_LINE_STATUS;
+const KVM_CAP_IRQ_INJECT_STATUS = c_kvm.KVM_CAP_IRQ_INJECT_STATUS;
 
 const ZVisorExit = enum {
     Unknown,
@@ -90,6 +92,14 @@ const ZVisorExit = enum {
     RiscvSbi,
     RiscvCsr,
     Notify,
+};
+
+pub const zv_kvm_irq_level = extern struct {
+    u_flds: extern union {
+        irq: u32,
+        level: u32,
+    },
+    level: u32,
 };
 
 // KVM run context structure
@@ -274,6 +284,7 @@ pub const Kvm = struct {
     vcpufd: os.fd_t,
     allocator: std.mem.Allocator,
     state: kvm_state,
+    irq_ioctl: u32 = KVM_IRQ_LINE,
 
     pub fn init(allocator: std.mem.Allocator, vm_ctx: *Vm) anyerror!Kvm {
         const flags: u32 = os.O.CLOEXEC | os.O.RDWR | os.O.DSYNC;
@@ -345,6 +356,14 @@ pub const Kvm = struct {
             }
         }
         try self.zvm_cpuids();
+    }
+
+    fn check_kvm_ext(self: *Self, ext: u32) bool {
+        send_ioctl(self.kvmfd, KVM_CHECK_EXTENSION, ext) catch |err| switch (err) {
+            error.IoCtlErr => return false,
+            else => unreachable,
+        };
+        return true;
     }
 
     fn zvm_cpuids(self: *Self) !void {
@@ -633,6 +652,14 @@ pub const Kvm = struct {
         }
     }
 
+    fn inject_interrupt(ctx: *anyopaque, irq: u32, level: u32) anyerror!void {
+        const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
+        var event = std.mem.zeroes(zv_kvm_irq_level);
+        event.u_flds.irq = irq;
+        event.level = level;
+        try send_ioctl(self.vmfd, self.irq_ioctl, @ptrToInt(&event));
+    }
+
     fn get_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32) u32 {
         return std.mem.readIntLittle(u32, @intToPtr(
             *u8,
@@ -654,13 +681,14 @@ pub const Kvm = struct {
     }
 
     fn setup_interrupt(self: *Self) anyerror!void {
-        const pit = mem.zeroes(kvm_pit_config);
-        // Create PIT device to emulate Interval Timer
-        try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
         // Create IRQ device to emulate Interrupt Controller
         // qBoot initializes APIC in the MP table that's why
         // APIC should be emulated in the zVisor
         try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
+
+        // KVM does initialize 8254 device to emulate PIT
+        const pit = mem.zeroes(kvm_pit_config);
+        try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
 
         const freq = try send_ioctl_res(self.vcpufd, KVM_GET_TSC_KHZ, 0);
         try send_ioctl(self.vcpufd, KVM_SET_TSC_KHZ, @intCast(c_ulong, freq));
@@ -673,14 +701,6 @@ pub const Kvm = struct {
         return lapic_state;
     }
 
-    pub fn set_irq(self: *Self, irq: u32, level: bool) void {
-        const event = std.mem.zeroes(kvm_irq_level);
-
-        event.level = level;
-        event.irq = irq;
-        try send_ioctl(self.vcpufd, KVM_IRQ_LINE, &event);
-    }
-
     pub fn get_accel(self: *Self) Accel {
         return Accel{
             .ptr = self,
@@ -689,11 +709,18 @@ pub const Kvm = struct {
                 .get_klapic_reg = get_klapic_reg,
                 .set_klapic_reg = set_klapic_reg,
                 .set_klapic = set_klapic,
+                .inject_interrupt = inject_interrupt,
             },
         };
     }
 
-    pub fn setup_vm(self: *Self, allocator: std.mem.Allocator, kernel: []u8, initrd: ?[]u8, cmdline: ?[]u8) anyerror!void {
+    pub fn setup_vm(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        kernel: []u8,
+        initrd: ?[]u8,
+        cmdline: ?[]u8,
+    ) anyerror!void {
         self.vmfd = try self.create_vm();
         self.add_mem_slot(.{
             .slot = 0,
@@ -713,6 +740,10 @@ pub const Kvm = struct {
         }) catch {
             fatal("unable to create memory slot for firmware\n", .{});
         };
+
+        if (self.check_kvm_ext(KVM_CAP_IRQ_INJECT_STATUS)) {
+            self.irq_ioctl = KVM_IRQ_LINE_STATUS;
+        }
 
         self.setup_interrupt() catch |err| {
             fatal("unable to set-up Interrupt Controller: {}\n", .{err});

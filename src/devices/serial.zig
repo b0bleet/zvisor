@@ -18,15 +18,22 @@ const Scr: u8 = 7;
 const LsrDataBit: u8 = 0x1;
 const LsrEmptyBit: u8 = 0x20;
 const LsrIdleBit: u8 = 0x40;
+const LsrIntAnyBit: u8 = 0x1e;
 
 const IirFifoBits: u8 = 0xc0;
 const IirNoneBit: u8 = 0x1;
 const IirThrBit: u8 = 0x2;
 const IirRecvBit: u8 = 0x4;
+const IirRlsiBit: u8 = 0x6;
+const IirMsiBit: u8 = 0x00;
 
 const IerRecvBit: u8 = 0x1;
 const IerThrBit: u8 = 0x2;
 const IerFifoBits: u8 = 0x0f;
+const IerRlsiBit: u8 = 0x4;
+const IerMsiBit: u8 = 0x8;
+
+const MsrAnyDeltaBit: u8 = 0xf;
 
 const InterruptIdentification: u8 = IirNoneBit;
 const LineControl: u8 = 0x3;
@@ -59,6 +66,7 @@ pub const SerialDevice = struct {
     in_buf: std.ArrayList(u8),
     out: fs.File.Writer,
     interrupt: *interrupt.InterruptManager,
+    irq: u32,
 
     pub fn init(allocator: std.mem.Allocator, intr_manager: *interrupt.InterruptManager) SerialDevice {
         return SerialDevice{
@@ -74,6 +82,7 @@ pub const SerialDevice = struct {
             .in_buf = std.ArrayList(u8).init(allocator),
             .out = std.io.getStdOut().writer(),
             .interrupt = intr_manager,
+            .irq = 4,
         };
     }
 
@@ -108,10 +117,10 @@ pub const SerialDevice = struct {
         return (self.intr_active & IerRecvBit) != 0;
     }
 
-    fn thr_empty(self: *@This()) void {
+    fn thr_empty(self: *@This()) !void {
         if (self.is_thr_intr_activated()) {
             self.mod_intr_bit(IirThrBit);
-            self.trigger_interrupt();
+            try self.trigger_interrupt();
         }
     }
 
@@ -131,16 +140,16 @@ pub const SerialDevice = struct {
         }
     }
 
-    fn recv_data(self: *@This()) void {
+    fn recv_data(self: *@This()) !void {
         if (self.is_recv_intr_activated()) {
             self.mod_intr_bit(IirRecvBit);
-            self.trigger_interrupt();
+            try self.trigger_interrupt();
         }
         self.line_status |= LsrDataBit;
     }
 
-    fn trigger_interrupt(_: *@This()) void {
-        std.debug.print("hell yeah\n", .{});
+    fn trigger_interrupt(self: *@This()) anyerror!void {
+        try self.interrupt.trigger(self.irq, 0);
     }
 
     fn do_write(self: *@This(), off: u8, base: u8) anyerror!void {
@@ -154,11 +163,11 @@ pub const SerialDevice = struct {
                     if (self.modem_ctrl_loop()) {
                         if (self.in_buf.items.len < LoopSize) {
                             try self.in_buf.append(base);
-                            self.recv_data();
+                            try self.recv_data();
                         }
                     } else {
                         try self.out.writeAll(&[_]u8{base});
-                        self.thr_empty();
+                        try self.thr_empty();
                     }
                 } else if (off == Ier) {
                     self.intr_active = base & IerFifoBits;
@@ -185,14 +194,15 @@ pub const SerialDevice = struct {
                     if (self.in_buf.items.len <= 1) {
                         self.line_status &= ~LsrDataBit;
                     }
-                    break :dlab 0x0;
-                } else if (off == Iir) {
-                    const i = self.intr_identify | IirFifoBits;
-                    self.iir_reset();
-                    break :dlab i;
+                    break :dlab if (self.in_buf.popOrNull()) |val| val else 0;
                 } else if (off == Ier) {
                     break :dlab self.intr_active;
                 }
+            },
+            Iir => iirblk: {
+                const i = self.intr_identify | IirFifoBits;
+                self.iir_reset();
+                break :iirblk i;
             },
             Lcr => self.line_control,
             Mcr => self.modem_control,

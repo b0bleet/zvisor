@@ -32,7 +32,8 @@ Here's an example command to run a virtual machine with 2GB of memory:
 ```bash
 ./zig-out/bin/zvisor --firmware ./qboot/build/bios.bin \
                       --kernel ./bzImage \
-                      --cmdline 'console=ttyS0,115200,8n1' \
+                      --cmdline 'console=ttyS0,115200,8n1 noapic ' \
                       --initrd ./initrd \
                       --memory 1G
 ```
+noapic should be passed because at the moment zVisor does support in-kernel PIC emulation 

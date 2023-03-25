@@ -51,8 +51,6 @@ const McrLoopBit: u8 = 0x10;
 
 const LoopSize = 0x40;
 
-var m = std.Thread.Mutex{};
-
 pub const SerialDevice = struct {
     id: []const u8,
     intr_enable: u8,
@@ -64,9 +62,11 @@ pub const SerialDevice = struct {
     scratch: u8,
     baud_divisor: u16,
     in_buf: std.ArrayList(u8),
+    read_in_buf: usize,
     out: fs.File.Writer,
     interrupt: *interrupt.InterruptManager,
     irq: u32,
+    m: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator, intr_manager: *interrupt.InterruptManager) SerialDevice {
         return SerialDevice{
@@ -80,6 +80,7 @@ pub const SerialDevice = struct {
             .scratch = 0,
             .baud_divisor = BaudDivisor,
             .in_buf = std.ArrayList(u8).init(allocator),
+            .read_in_buf = 0,
             .out = std.io.getStdOut().writer(),
             .interrupt = intr_manager,
             .irq = 4,
@@ -101,6 +102,20 @@ pub const SerialDevice = struct {
         };
     }
 
+    pub fn popFrontOrNull(self: *@This()) ?@TypeOf(self.in_buf.items[0]) {
+        if (self.in_buf.items.len == 0) return null;
+        return self.in_buf.orderedRemove(0);
+    }
+
+    pub fn queue_bytes(self: *@This(), bytes: *const []u8) !void {
+        self.m.lock();
+        defer self.m.unlock();
+        if (!self.modem_ctrl_loop()) {
+            try self.in_buf.appendSlice(bytes.*);
+            try self.recv_data();
+        }
+    }
+
     fn dlab_set(self: *@This()) bool {
         return (self.line_control & LcrDlabBit) != 0;
     }
@@ -115,6 +130,10 @@ pub const SerialDevice = struct {
 
     fn is_recv_intr_enabled(self: *@This()) bool {
         return (self.intr_enable & IerRecvBit) != 0;
+    }
+
+    fn is_thr_iir_enabled(self: *@This()) bool {
+        return (self.intr_identify & IirThrBit != 0);
     }
 
     fn thr_empty(self: *@This()) !void {
@@ -149,8 +168,7 @@ pub const SerialDevice = struct {
     }
 
     fn update_irq(self: *@This()) !void {
-        if (!self.is_thr_intr_enabled() and (self.intr_identify & IirThrBit) != 0) {
-            self.iir_reset();
+        if (!self.is_thr_intr_enabled() and self.is_thr_iir_enabled()) {
             try self.trigger_interrupt(0);
         }
     }
@@ -191,6 +209,10 @@ pub const SerialDevice = struct {
     fn read(ctx: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
         const self = @ptrCast(*SerialDevice, @alignCast(@alignOf(SerialDevice), ctx));
         const off = @truncate(u8, offset);
+
+        self.m.lock();
+        defer self.m.unlock();
+
         data[0] = switch (off) {
             DlabLow...DlabHigh => dlab: {
                 if (off == DlabLow and self.dlab_set()) {
@@ -202,7 +224,7 @@ pub const SerialDevice = struct {
                     if (self.in_buf.items.len <= 1) {
                         self.line_status &= ~LsrDataBit;
                     }
-                    break :dlab if (self.in_buf.popOrNull()) |val| val else 0;
+                    break :dlab if (self.popFrontOrNull()) |val| val else 0;
                 } else if (off == Ier) {
                     break :dlab self.intr_enable;
                 }
@@ -223,6 +245,10 @@ pub const SerialDevice = struct {
 
     fn write(ctx: *anyopaque, offset: u64, _: u64, data: []u8) !void {
         const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), ctx));
+
+        self.m.lock();
+        defer self.m.unlock();
+
         try self.do_write(@truncate(u8, offset), data[0]);
     }
 

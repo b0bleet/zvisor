@@ -2,17 +2,17 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const serial = @import("devices/serial.zig");
 const i8042dev = @import("devices/i8042.zig");
+const console_controller = @import("console_controller.zig");
 const interrupt_controller = @import("devices/interrupt_controller.zig");
 const interrupt = @import("interrupt.zig");
 const InterruptManager = interrupt.InterruptManager;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
+const ConsoleController = console_controller.ConsoleController;
 const SerialDevice = serial.SerialDevice;
 const i8042Device = i8042dev.i8042Device;
 const InterruptController = interrupt_controller.InterruptController;
-
-var m = std.Thread.Mutex{};
 
 pub const IoReqType = enum {
     Read,
@@ -39,15 +39,13 @@ pub const DeviceControl = struct {
     bus: std.ArrayList(Device) = undefined,
     devices_count_max: u16 = 0xffff,
     allocator: std.mem.Allocator = undefined,
+    console_handle: ?ConsoleController = null,
     pub fn init_io_devs(self: *Self, allocator: std.mem.Allocator, intr_manager: *InterruptManager) anyerror!void {
         self.allocator = allocator;
         self.bus = try std.ArrayList(Device).initCapacity(allocator, self.devices_count_max);
         errdefer self.bus.deinit();
 
-        var serial_dev = allocator.create(SerialDevice) catch |err| return err;
-        errdefer allocator.destroy(serial_dev);
-        serial_dev.* = serial.SerialDevice.init(allocator, intr_manager);
-        try self.add_dev(serial_dev.dev());
+        try self.start_console_dev(allocator, intr_manager);
 
         var i8042_dev = allocator.create(i8042Device) catch |err| return err;
         errdefer allocator.destroy(i8042_dev);
@@ -70,7 +68,7 @@ pub const DeviceControl = struct {
         try self.bus.append(dev);
     }
 
-    pub fn find_dev(self: *Self, base: u64) ?Device {
+    pub fn find_dev(self: *const Self, base: u64) ?Device {
         for (self.bus.items) |b| {
             if (b.base <= base and base <= b.size) {
                 return b;
@@ -79,9 +77,7 @@ pub const DeviceControl = struct {
         return null;
     }
 
-    pub fn handle_dev(_: *Self, port: u64, dev: Device, direction: IoReqType, data: [*]u8, size: usize) anyerror!void {
-        m.lock();
-        defer m.unlock();
+    pub fn handle_dev(_: *const Self, port: u64, dev: Device, direction: IoReqType, data: [*]u8, size: usize) anyerror!void {
         const slice_data = data[0..size];
         switch (direction) {
             .Read => {
@@ -100,6 +96,19 @@ pub const DeviceControl = struct {
             self.allocator.destroy(dev);
         }
         self.bus.deinit();
+    }
+
+    fn start_console_dev(self: *Self, allocator: std.mem.Allocator, intr_manager: *InterruptManager) !void {
+        var serial_dev = allocator.create(SerialDevice) catch |err| return err;
+        errdefer allocator.destroy(serial_dev);
+        serial_dev.* = serial.SerialDevice.init(allocator, intr_manager);
+        try self.add_dev(serial_dev.dev());
+
+        var console_control = try ConsoleController.init(.Tty, serial_dev);
+        if (console_control) |*console| {
+            self.console_handle = console.*;
+            try console.start_thread();
+        }
     }
 };
 

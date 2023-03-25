@@ -200,6 +200,8 @@ pub const Vm = struct {
             utils.fatal("unable to initialize PCI devices: {}\n", .{err});
         };
 
+        defer if (self.io_bus.console_handle) |console| console.handle.join();
+
         kvm_ctx.run_vm() catch |err| {
             fatal("unable to run VM with KVM accelerator: {}", .{err});
         };

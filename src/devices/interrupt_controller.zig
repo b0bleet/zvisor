@@ -30,17 +30,7 @@ pub const InterruptController = struct {
         };
     }
 
-    fn read(ctx: *anyopaque, offset: u64, _: u64, data: []u8) anyerror!void {
-        _ = ctx;
-        _ = offset;
-        _ = data;
-        std.debug.print("hello for read mmio bus\n", .{});
-    }
+    fn read(_: *anyopaque, _: u64, _: u64, _: []u8) anyerror!void {}
 
-    fn write(ctx: *anyopaque, offset: u64, _: u64, data: []u8) !void {
-        std.debug.print("hello for write mmio bus\n", .{});
-        _ = ctx;
-        _ = offset;
-        _ = data;
-    }
+    fn write(_: *anyopaque, _: u64, _: u64, _: []u8) !void {}
 };

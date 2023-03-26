@@ -62,7 +62,6 @@ pub const SerialDevice = struct {
     scratch: u8,
     baud_divisor: u16,
     in_buf: std.ArrayList(u8),
-    read_in_buf: usize,
     out: fs.File.Writer,
     interrupt: *interrupt.InterruptManager,
     irq: u32,
@@ -80,7 +79,6 @@ pub const SerialDevice = struct {
             .scratch = 0,
             .baud_divisor = BaudDivisor,
             .in_buf = std.ArrayList(u8).init(allocator),
-            .read_in_buf = 0,
             .out = std.io.getStdOut().writer(),
             .interrupt = intr_manager,
             .irq = 4,
@@ -100,11 +98,6 @@ pub const SerialDevice = struct {
                 .write = write,
             },
         };
-    }
-
-    pub fn popFrontOrNull(self: *@This()) ?@TypeOf(self.in_buf.items[0]) {
-        if (self.in_buf.items.len == 0) return null;
-        return self.in_buf.orderedRemove(0);
     }
 
     pub fn queue_bytes(self: *@This(), bytes: *const []u8) !void {
@@ -175,6 +168,13 @@ pub const SerialDevice = struct {
 
     fn trigger_interrupt(self: *@This(), level: u8) anyerror!void {
         try self.interrupt.trigger(self.irq, level);
+    }
+
+    fn popFrontOrNull(self: *@This()) ?@TypeOf(self.in_buf.items[0]) {
+        if (self.in_buf.items.len == 0) return null;
+        const val = self.in_buf.items[0];
+        self.in_buf.items = self.in_buf.items[1..];
+        return val;
     }
 
     fn do_write(self: *@This(), off: u8, base: u8) anyerror!void {
@@ -252,7 +252,7 @@ pub const SerialDevice = struct {
         try self.do_write(@truncate(u8, offset), data[0]);
     }
 
-    fn deinit(ctx: *anyopaque) void {
+    pub fn deinit(ctx: *anyopaque) void {
         const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), ctx));
         self.in_buf.deinit();
     }

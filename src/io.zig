@@ -37,31 +37,16 @@ pub const DeviceControl = struct {
     const Self = @This();
 
     bus: std.ArrayList(Device) = undefined,
-    devices_count_max: u16 = 0xffff,
     allocator: std.mem.Allocator = undefined,
-    console_handle: ?ConsoleController = null,
-    pub fn init_io_devs(self: *Self, allocator: std.mem.Allocator, intr_manager: *InterruptManager) anyerror!void {
-        self.allocator = allocator;
-        self.bus = try std.ArrayList(Device).initCapacity(allocator, self.devices_count_max);
-        errdefer self.bus.deinit();
+    pub fn init(allocator: std.mem.Allocator) anyerror!Self {
+        const devices_count_max: u16 = 0xffff;
+        const dev_bus = try std.ArrayList(Device).initCapacity(allocator, devices_count_max);
+        errdefer dev_bus.deinit();
 
-        try self.start_console_dev(allocator, intr_manager);
-
-        var i8042_dev = allocator.create(i8042Device) catch |err| return err;
-        errdefer allocator.destroy(i8042_dev);
-        i8042_dev.* = i8042Device.init();
-        try self.add_dev(i8042_dev.dev());
-    }
-
-    pub fn init_mmio_devs(self: *Self, allocator: std.mem.Allocator) anyerror!void {
-        self.allocator = allocator;
-        self.bus = try std.ArrayList(Device).initCapacity(allocator, self.devices_count_max);
-        errdefer self.bus.deinit();
-
-        var intr_dev = allocator.create(InterruptController) catch |err| return err;
-        errdefer allocator.destroy(intr_dev);
-        intr_dev.* = interrupt_controller.InterruptController.init(interrupt_controller.APIC_START);
-        try self.add_dev(intr_dev.dev());
+        return Self{
+            .allocator = allocator,
+            .bus = dev_bus,
+        };
     }
 
     pub fn add_dev(self: *Self, dev: Device) anyerror!void {
@@ -97,18 +82,63 @@ pub const DeviceControl = struct {
         }
         self.bus.deinit();
     }
+};
 
-    fn start_console_dev(self: *Self, allocator: std.mem.Allocator, intr_manager: *InterruptManager) !void {
-        var serial_dev = allocator.create(SerialDevice) catch |err| return err;
-        errdefer allocator.destroy(serial_dev);
-        serial_dev.* = serial.SerialDevice.init(allocator, intr_manager);
-        try self.add_dev(serial_dev.dev());
+pub const DeviceManager = struct {
+    allocator: std.mem.Allocator,
+    io_bus: DeviceControl,
+    mmio_bus: DeviceControl,
+    console_handle: ?ConsoleController,
+    intr_manager: *InterruptManager,
+
+    pub fn init(allocator: std.mem.Allocator, intr_manager: *InterruptManager) !DeviceManager {
+        return DeviceManager{
+            .allocator = allocator,
+            .console_handle = null,
+            .io_bus = try DeviceControl.init(allocator),
+            .mmio_bus = try DeviceControl.init(allocator),
+            .intr_manager = intr_manager,
+        };
+    }
+
+    pub fn create_devices(self: *@This()) anyerror!void {
+        var i8042_dev = self.allocator.create(i8042Device) catch |err| return err;
+        errdefer self.allocator.destroy(i8042_dev);
+        i8042_dev.* = i8042Device.init();
+        try self.io_bus.add_dev(i8042_dev.dev());
+
+        var intr_dev = self.allocator.create(InterruptController) catch |err| return err;
+        errdefer self.allocator.destroy(intr_dev);
+        intr_dev.* = interrupt_controller.InterruptController.init(interrupt_controller.APIC_START);
+        try self.mmio_bus.add_dev(intr_dev.dev());
+
+        var serial_dev = self.allocator.create(SerialDevice) catch |err| return err;
+        errdefer self.allocator.destroy(serial_dev);
+        serial_dev.* = serial.SerialDevice.init(self.allocator, self.intr_manager);
+        try self.io_bus.add_dev(serial_dev.dev());
 
         var console_control = try ConsoleController.init(.Tty, serial_dev);
         if (console_control) |*console| {
             self.console_handle = console.*;
             try console.start_thread();
         }
+    }
+
+    pub fn handle_io_req(self: *@This(), reqtype: IoReqType, port: u16, data: [*]u8, size: usize) anyerror!void {
+        if (self.io_bus.find_dev(port)) |dev| {
+            try self.io_bus.handle_dev(port, dev, reqtype, data, size);
+        }
+    }
+
+    pub fn handle_mmio_req(self: *@This(), reqtype: IoReqType, addr: u64, data: [*]u8, len: usize) anyerror!void {
+        if (self.mmio_bus.find_dev(addr)) |dev| {
+            try self.mmio_bus.handle_dev(addr, dev, reqtype, data, len);
+        }
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.io_bus.deinit();
+        self.mmio_bus.deinit();
     }
 };
 

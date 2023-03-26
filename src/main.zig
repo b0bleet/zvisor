@@ -174,17 +174,15 @@ pub fn main() anyerror!void {
     const vcpu_state = std.ArrayList(vm.VcpuState).initCapacity(allocator, cpus) catch |err| {
         utils.fatal("Unable to allocate VcpuState: {}", .{err});
     };
-    var vm_ctx = Vm{ .vcpu_state = vcpu_state };
-    vm_ctx.init(allocator, config) catch |err| switch (err) {
+
+    var vm_ctx = Vm.init(allocator, config, vcpu_state) catch |err| switch (err) {
         error.FileNotFound => {
             fatal("The specified firmware file could not be found.\n", .{});
         },
         else => fatal("unable to initialize vm context: {}", .{err}),
     };
-    vm_ctx.run_vm(allocator, config) catch |err| {
-        fatal("unable to run vm: {}\n", .{err});
-    };
 
+    vm_ctx.run_vm(allocator, config) catch |err| fatal("unable to run vm: {}\n", .{err});
     defer vm_ctx.deinit();
 }
 

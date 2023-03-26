@@ -26,6 +26,7 @@ const kvm_cpuid_entry2 = c_kvm.kvm_cpuid_entry2;
 const kvm_pit_config = c_kvm.kvm_pit_config;
 const kvm_lapic_state = c_kvm.kvm_lapic_state;
 const kvm_irq_level = c_kvm.kvm_irq_level;
+const kvm_irqchip = c_kvm.kvm_irqchip;
 
 const KVM_GET_SUPPORTED_CPUID = c_kvm.KVM_GET_SUPPORTED_CPUID;
 const KVM_CREATE_VM = c_kvm.KVM_CREATE_VM;
@@ -52,6 +53,7 @@ const KVM_SET_LAPIC = c_kvm.KVM_SET_LAPIC;
 const KVM_IRQ_LINE = c_kvm.KVM_IRQ_LINE;
 const KVM_IRQ_LINE_STATUS = c_kvm.KVM_IRQ_LINE_STATUS;
 const KVM_CAP_IRQ_INJECT_STATUS = c_kvm.KVM_CAP_IRQ_INJECT_STATUS;
+const KVM_IRQCHIP_IOAPIC = c_kvm.KVM_IRQCHIP_IOAPIC;
 
 const ZVisorExit = enum {
     Unknown,
@@ -628,7 +630,7 @@ pub const Kvm = struct {
                 },
                 .Io => exit_io: {
                     const io_data = @intToPtr([*]u8, @ptrToInt(zv_run) + zv_run.u_flds.io.data_offset);
-                    try self.vm.io_req(
+                    try self.vm.dev_manager.handle_io_req(
                         @intToEnum(io.IoReqType, zv_run.u_flds.io.direction),
                         zv_run.u_flds.io.port,
                         io_data,
@@ -637,7 +639,7 @@ pub const Kvm = struct {
                     break :exit_io;
                 },
                 .Mmio => {
-                    try self.vm.mmio_req(
+                    try self.vm.dev_manager.handle_mmio_req(
                         @intToEnum(io.IoReqType, zv_run.u_flds.mmio.is_write),
                         zv_run.u_flds.mmio.phys_addr,
                         &zv_run.u_flds.mmio.data,
@@ -680,18 +682,19 @@ pub const Kvm = struct {
         try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
     }
 
-    fn setup_interrupt(self: *Self) anyerror!void {
+    fn setup_kvm_interrupt(self: *Self) anyerror!void {
         // Create IRQ device to emulate Interrupt Controller
         // qBoot initializes APIC in the MP table that's why
-        // APIC should be emulated in the zVisor
+        // APIC should be emulated in the Zvisor
         try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
 
-        // KVM does initialize 8254 device to emulate PIT
+        // Initialize in-kernel PIT device emulation
         const pit = mem.zeroes(kvm_pit_config);
         try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
+    }
 
-        const freq = try send_ioctl_res(self.vcpufd, KVM_GET_TSC_KHZ, 0);
-        try send_ioctl(self.vcpufd, KVM_SET_TSC_KHZ, @intCast(c_ulong, freq));
+    fn setup_ioapic(ctx: *anyopaque) !void {
+        _ = ctx;
     }
 
     pub fn get_klapic(ctx: *anyopaque) !LapicState {
@@ -710,6 +713,7 @@ pub const Kvm = struct {
                 .set_klapic_reg = set_klapic_reg,
                 .set_klapic = set_klapic,
                 .inject_interrupt = inject_interrupt,
+                .setup_ioapic = setup_ioapic,
             },
         };
     }
@@ -722,32 +726,31 @@ pub const Kvm = struct {
         cmdline: ?[]u8,
     ) anyerror!void {
         self.vmfd = try self.create_vm();
+
         self.add_mem_slot(.{
             .slot = 0,
             .flags = 0,
             .size = self.vm.vm_mem_size,
             .phys_addr = 0x0,
             .mem = @ptrToInt(self.vm.vm_mem_ptr.ptr),
-        }) catch {
-            fatal("unable to create memory slot for vm\n", .{});
-        };
+        }) catch fatal("unable to create memory slot for vm\n", .{});
+
         self.add_mem_slot(.{
             .slot = 1,
             .flags = KVM_MEM_READONLY,
             .size = self.vm.fw_mem_size,
             .phys_addr = 0xffff0000,
             .mem = @ptrToInt(self.vm.vm_mem_ptr.ptr) + self.vm.fw_phys_mem_area,
-        }) catch {
-            fatal("unable to create memory slot for firmware\n", .{});
-        };
+        }) catch fatal("unable to create memory slot for firmware\n", .{});
 
         if (self.check_kvm_ext(KVM_CAP_IRQ_INJECT_STATUS)) {
             self.irq_ioctl = KVM_IRQ_LINE_STATUS;
         }
 
-        self.setup_interrupt() catch |err| {
-            fatal("unable to set-up Interrupt Controller: {}\n", .{err});
-        };
+        // Create an in-kernel IRQ chip to support emulation of IOAPIC, PIC, and etc.
+        // The KVM_CREATE_IRQCHIP ioctl command initializes and configures
+        // PIC and I/O APIC to provide emulation of an interrupt controller.
+        self.setup_kvm_interrupt() catch |err| fatal("unable to set-up KVM based Interrupt Controller: {}\n", .{err});
 
         self.vcpufd = try self.create_vcpu();
         const last_vcpu_id = if (self.vm.vcpu_state.getLastOrNull()) |vcpu| vcpu.cpu_id + 1 else 1;
@@ -756,9 +759,7 @@ pub const Kvm = struct {
             .msrs = std.ArrayList(zig_vm.MsrEntry).init(allocator),
         });
 
-        self.setup_vcpu_mem() catch |err| {
-            fatal("unable to initialize vcpu memory area: {}", .{err});
-        };
+        self.setup_vcpu_mem() catch |err| fatal("unable to initialize vcpu memory area: {}", .{err});
 
         const initrd_file = if (initrd) |filename| try utils.read_file(allocator, filename) else null;
         const kernel_file = try utils.read_file(allocator, kernel);

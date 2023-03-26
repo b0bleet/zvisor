@@ -15,6 +15,7 @@ const ConsoleMode = enum {
 
 const EpollMode = enum {
     File,
+    Unknown,
 };
 
 pub const ConsoleController = struct {
@@ -67,7 +68,6 @@ pub const ConsoleController = struct {
             },
             else => @compileError("unsupported Os"),
         }
-
         return null;
     }
 
@@ -94,16 +94,19 @@ pub const ConsoleController = struct {
                         const dispatch = @intToEnum(EpollMode, @intCast(usize, ev.data.ptr));
                         switch (dispatch) {
                             .File => {
-                                var bytes: [MaxBufBytes]u8 = undefined;
-                                const count = std.os.read(polledfd, &bytes) catch |err| switch (err) {
-                                    error.WouldBlock => {
-                                        continue;
-                                    },
-                                    else => return err,
-                                };
-                                
-                                try serial_dev.queue_bytes(&bytes[0..count]);
-                            }
+                                if (@as(u32, ev.events & os.linux.EPOLL.IN) != 0) {
+                                    var bytes: [MaxBufBytes]u8 = undefined;
+                                    const count = std.os.read(polledfd, &bytes) catch |err| switch (err) {
+                                        error.WouldBlock => {
+                                            continue;
+                                        },
+                                        else => return err,
+                                    };
+
+                                    try serial_dev.queue_bytes(&bytes[0..count]);
+                                }
+                            },
+                            else => unreachable,
                         }
                     }
                 },

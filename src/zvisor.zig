@@ -3,9 +3,10 @@ const utils = @import("utils.zig");
 const io = @import("io.zig");
 const serial = @import("devices/serial.zig");
 const kvm = @import("kvm.zig");
-const Config = @import("root").Config;
 const interrupt = @import("interrupt.zig");
 const c_kvm = @import("root").c_kvm;
+
+const Config = @import("root").Config;
 
 const assert = std.debug.assert;
 const fatal = utils.fatal;
@@ -14,6 +15,7 @@ const os = std.os;
 const mem = std.mem;
 const File = fs.File;
 const DeviceControl = io.DeviceControl;
+const DeviceManager = io.DeviceManager;
 const IoReqType = io.IoReqType;
 const InterruptManager = interrupt.InterruptManager;
 
@@ -36,6 +38,7 @@ const AccelVTable = struct {
     set_klapic_reg: *const fn (*anyopaque, *LapicState, u32, u32) void,
     set_klapic: *const fn (*anyopaque, *LapicState) anyerror!void,
     inject_interrupt: *const fn (*anyopaque, irq: u32, level: u32) anyerror!void,
+    setup_ioapic: *const fn (*anyopaque) anyerror!void,
 };
 
 pub const Accel = struct {
@@ -130,21 +133,23 @@ const ZvCpuid = struct {
 pub const Vm = struct {
     const Self = @This();
 
-    io_bus: DeviceControl = DeviceControl{},
-    mmio_bus: DeviceControl = DeviceControl{},
+    dev_manager: DeviceManager = undefined,
     intr_manager: *interrupt.InterruptManager = undefined,
-    fw_phys_mem_area: u20 = 0xf0000,
+    fw_phys_mem_area: u20,
     /// Allocated memory region for virtual machine
     vm_mem_ptr: []align(mem.page_size) u8 = undefined,
     /// Default VM memory size is 512 MB
     /// that will be extended via command-line argument.
-    vm_mem_size: usize = (512 * 1024 * 1024), // 512 MiB
+    vm_mem_size: usize,
     fw_mem_size: usize = undefined,
     /// Allocate memory area for binary file.
     /// Then extract firmware binary file and filling
     /// allocated memory area with that binary file
     vcpu_state: std.ArrayList(VcpuState),
-    pub fn init(self: *Self, allocator: std.mem.Allocator, config: Config) !void {
+    // TODO(refactor init function)
+    pub fn init(allocator: mem.Allocator, config: Config, vcpu: std.ArrayList(VcpuState)) !Self {
+        var vm_mem_size: usize = (512 * 1024 * 1024); // 512 MiB
+        const fw_phys_mem_area = 0xf0000;
         const fw = config.firmware;
         const mem_size = config.memory;
 
@@ -158,34 +163,40 @@ pub const Vm = struct {
                 'M' => (size_val * mib_unit),
                 else => unreachable,
             };
-            self.vm_mem_size = size_as_unit;
+            vm_mem_size = size_as_unit;
         }
         // Allocate memory for VM with default size
-        const vm_mem = try utils.alloc_mem(self.vm_mem_size, null);
+        const vm_mem = try utils.alloc_mem(vm_mem_size, null);
         errdefer os.munmap(vm_mem);
 
         const firmware = try utils.read_file(allocator, fw);
         defer allocator.free(firmware);
-        self.fw_mem_size = firmware.len;
-        const bios_area = @intToPtr([*]u8, @ptrToInt(vm_mem.ptr) + self.fw_phys_mem_area);
+
+        const bios_area = @intToPtr([*]u8, @ptrToInt(vm_mem.ptr) + fw_phys_mem_area);
         @memcpy(bios_area, firmware.ptr, firmware.len);
 
-        // Set up VM context for virtualization module (KVM, WHVP)
-        self.vm_mem_ptr = vm_mem;
+        return Self{
+            .fw_phys_mem_area = fw_phys_mem_area,
+            .vcpu_state = vcpu,
+            .fw_mem_size = firmware.len,
+            .vm_mem_ptr = vm_mem,
+            .vm_mem_size = vm_mem_size,
+        };
     }
 
     pub fn run_vm(self: *@This(), allocator: std.mem.Allocator, config: Config) anyerror!void {
         // Initialize VM accelerator
         // At the moment KVM will be used by default
         // Initialize KVM context
-        var kvm_ctx = kvm.Kvm.init(allocator, self) catch |err| {
-            fatal("unable to initialize kvm context: {}", .{err});
-        };
+        var kvm_ctx = kvm.Kvm.init(allocator, self) catch |err| fatal("unable to initialize kvm context: {}", .{err});
         defer kvm_ctx.deinit();
 
-        kvm_ctx.setup_vm(allocator, config.kernel, config.initrd, config.cmdline) catch |err| {
-            fatal("unable to run accelerator: {}", .{err});
-        };
+        kvm_ctx.setup_vm(
+            allocator,
+            config.kernel,
+            config.initrd,
+            config.cmdline,
+        ) catch |err| fatal("unable to run accelerator: {}", .{err});
 
         const accel = kvm_ctx.get_accel();
 
@@ -196,21 +207,17 @@ pub const Vm = struct {
         errdefer allocator.destroy(self.intr_manager);
 
         // Set up `Devices` object and initalize all PCI buses
-        self.init_devices(allocator) catch |err| {
-            utils.fatal("unable to initialize PCI devices: {}\n", .{err});
-        };
+        self.init_devices(allocator) catch |err| utils.fatal("unable to initialize PCI devices: {}\n", .{err});
 
-        defer if (self.io_bus.console_handle) |console| console.handle.join();
+        defer if (self.dev_manager.console_handle) |console| console.handle.join();
+        //try self.intr_manager.setup();
 
-        kvm_ctx.run_vm() catch |err| {
-            fatal("unable to run VM with KVM accelerator: {}", .{err});
-        };
+        kvm_ctx.run_vm() catch |err| fatal("unable to run VM with KVM accelerator: {}", .{err});
     }
 
     pub fn deinit(self: *Vm) void {
         os.munmap(self.vm_mem_ptr);
-        self.io_bus.deinit();
-        self.mmio_bus.deinit();
+        self.dev_manager.deinit();
         self.intr_manager.deinit();
 
         // iterate over vcpus and deallocate msr entries
@@ -222,22 +229,11 @@ pub const Vm = struct {
         self.vcpu_state.deinit();
     }
 
-    pub fn io_req(self: *Self, reqtype: IoReqType, port: u16, data: [*]u8, size: usize) anyerror!void {
-        if (self.io_bus.find_dev(port)) |dev| {
-            try self.io_bus.handle_dev(port, dev, reqtype, data, size);
-        }
-    }
-
-    pub fn mmio_req(self: *Self, reqtype: IoReqType, addr: u64, data: [*]u8, len: usize) anyerror!void {
-        if (self.mmio_bus.find_dev(addr)) |dev| {
-            try self.mmio_bus.handle_dev(addr, dev, reqtype, data, len);
-        }
-    }
-
     // Initialize MMIO and I/O devices through device controller
     fn init_devices(self: *Self, allocator: std.mem.Allocator) anyerror!void {
-        try self.io_bus.init_io_devs(allocator, self.intr_manager);
-        try self.mmio_bus.init_mmio_devs(allocator);
+        self.dev_manager = try DeviceManager.init(allocator, self.intr_manager);
+        errdefer self.dev_manager.deinit();
+        try self.dev_manager.create_devices();
     }
 
     fn prep_cpuid(_: *Self, allocator: std.mem.Allocator) anyerror!void {

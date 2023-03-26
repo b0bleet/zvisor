@@ -22,6 +22,11 @@ pub const InterruptManager = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn setup(self: *@This()) !void {
+        const vcpu = self.accel.vtable;
+        try vcpu.setup_ioapic(self.accel.ptr);
+    }
+
     pub fn trigger(self: *@This(), irq: u32, level: u32) !void {
         const vcpu = self.accel.vtable;
         try vcpu.inject_interrupt(self.accel.ptr, irq, level);

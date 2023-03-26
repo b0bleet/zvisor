@@ -205,6 +205,7 @@ pub const Vm = struct {
 
         self.intr_manager = try interrupt.InterruptManager.init(&accel, allocator);
         errdefer allocator.destroy(self.intr_manager);
+        try self.intr_manager.setup();
 
         // Set up `Devices` object and initalize all PCI buses
         self.init_devices(allocator) catch |err| utils.fatal("unable to initialize PCI devices: {}\n", .{err});

@@ -20,13 +20,10 @@ const send_ioctl = utils.send_ioctl;
 // KVM API
 const kvm_regs = c_kvm.kvm_regs;
 const kvm_sregs = c_kvm.kvm_sregs;
-const kvm_run = c_kvm.kvm_run;
 const kvm_userspace_memory_region = c_kvm.kvm_userspace_memory_region;
 const kvm_cpuid_entry2 = c_kvm.kvm_cpuid_entry2;
 const kvm_pit_config = c_kvm.kvm_pit_config;
 const kvm_lapic_state = c_kvm.kvm_lapic_state;
-const kvm_irq_level = c_kvm.kvm_irq_level;
-const kvm_irqchip = c_kvm.kvm_irqchip;
 
 const KVM_GET_SUPPORTED_CPUID = c_kvm.KVM_GET_SUPPORTED_CPUID;
 const KVM_CREATE_VM = c_kvm.KVM_CREATE_VM;
@@ -54,6 +51,10 @@ const KVM_IRQ_LINE = c_kvm.KVM_IRQ_LINE;
 const KVM_IRQ_LINE_STATUS = c_kvm.KVM_IRQ_LINE_STATUS;
 const KVM_CAP_IRQ_INJECT_STATUS = c_kvm.KVM_CAP_IRQ_INJECT_STATUS;
 const KVM_IRQCHIP_IOAPIC = c_kvm.KVM_IRQCHIP_IOAPIC;
+
+// hacky way to call `KVM_GET_IRQCHIP/KVM_SET_IRQCHIP` ioctl command with modified `kvm_irqchip`
+const KVM_GET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x62), kvm_irqchip);
+const KVM_SET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x63), kvm_irqchip);
 
 const ZVisorExit = enum {
     Unknown,
@@ -96,7 +97,46 @@ const ZVisorExit = enum {
     Notify,
 };
 
-pub const zv_kvm_irq_level = extern struct {
+const kvm_pic_state = extern struct {
+    last_irr: u8, // edge detection
+    irr: u8, // interrupt request register
+    imr: u8, // interrupt mask register
+    isr: u8, // interrupt service register
+    priority_add: u8, // highest irq priority
+    irq_base: u8,
+    read_reg_select: u8,
+    poll: u8,
+    special_mask: u8,
+    init_state: u8,
+    auto_eoi: u8,
+    rotate_on_auto_eoi: u8,
+    special_fully_nested_mode: u8,
+    init4: u8, // true if 4 byte init
+    elcr: u8, // PIIX edge/trigger selection
+    elcr_mask: u8,
+};
+
+const KvmIoApicNumPins = 24;
+const kvm_ioapic_state = extern struct {
+    base_address: u64,
+    ioregsel: u32,
+    id: u32,
+    irr: u32,
+    pad: u32,
+    redirtbl: [KvmIoApicNumPins]u64,
+};
+
+const kvm_irqchip = extern struct {
+    chip_id: u32,
+    pad: u32,
+    chip: extern union {
+        dummy: [512]u8,
+        pic: kvm_pic_state,
+        ioapic: kvm_ioapic_state,
+    },
+};
+
+pub const kvm_irq_level = extern struct {
     u_flds: extern union {
         irq: u32,
         level: u32,
@@ -105,7 +145,7 @@ pub const zv_kvm_irq_level = extern struct {
 };
 
 // KVM run context structure
-pub const zv_kvm_run = extern struct {
+pub const kvm_run = extern struct {
     request_interrupt_window: u8,
     immediate_exit: u8,
     padding1: [6]u8,
@@ -265,7 +305,7 @@ const kvm_mem = struct {
 const max_cpuid_entries = 100;
 const max_e820_entries = 1;
 
-const kvm_io_type = utils.get_field(utils.get_field(zv_kvm_run, "u_flds"), "io");
+const kvm_io_type = utils.get_field(utils.get_field(kvm_run, "u_flds"), "io");
 
 pub const Kvm = struct {
     const Self = @This();
@@ -622,7 +662,7 @@ pub const Kvm = struct {
             try send_ioctl(self.vcpufd, KVM_RUN, 0);
             const exit_reason = self.run.exit_reason;
             var regs = try self.get_regs();
-            const zv_run = @ptrCast(*zv_kvm_run, @alignCast(@alignOf(zv_kvm_run), self.run));
+            const zv_run = @ptrCast(*kvm_run, @alignCast(@alignOf(kvm_run), self.run));
             switch (@intToEnum(ZVisorExit, exit_reason)) {
                 .Hlt => {
                     std.debug.print("HLT instruction executed {x}\n", .{regs.rip});
@@ -656,10 +696,27 @@ pub const Kvm = struct {
 
     fn inject_interrupt(ctx: *anyopaque, irq: u32, level: u32) anyerror!void {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
-        var event = std.mem.zeroes(zv_kvm_irq_level);
+        var event = std.mem.zeroes(kvm_irq_level);
         event.u_flds.irq = irq;
         event.level = level;
         try send_ioctl(self.vmfd, self.irq_ioctl, @ptrToInt(&event));
+    }
+
+    fn setup_kvm_interrupt(self: *Self) anyerror!void {
+        // Create IRQ device to emulate Interrupt Controller
+        // qBoot initializes APIC in the MP table that's why
+        // APIC should be emulated in the Zvisor
+        try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
+
+        // Initialize in-kernel PIT device emulation
+        const pit = mem.zeroes(kvm_pit_config);
+        try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
+    }
+
+    fn setup_ioapic(ctx: *anyopaque) !void {
+        const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
+        const irq_ioapic = try self.get_irqchip(KVM_IRQCHIP_IOAPIC);
+        _ = irq_ioapic;
     }
 
     fn get_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32) u32 {
@@ -682,19 +739,14 @@ pub const Kvm = struct {
         try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
     }
 
-    fn setup_kvm_interrupt(self: *Self) anyerror!void {
-        // Create IRQ device to emulate Interrupt Controller
-        // qBoot initializes APIC in the MP table that's why
-        // APIC should be emulated in the Zvisor
-        try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
-
-        // Initialize in-kernel PIT device emulation
-        const pit = mem.zeroes(kvm_pit_config);
-        try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
+    fn set_irqchip(self: *Self, chip: *kvm_irqchip) !void {
+        try send_ioctl(self.vmfd, KVM_SET_IRQCHIP, @ptrToInt(chip));
     }
 
-    fn setup_ioapic(ctx: *anyopaque) !void {
-        _ = ctx;
+    fn get_irqchip(self: *Self, irqchip: u32) !kvm_irqchip {
+        var chip = std.mem.zeroInit(kvm_irqchip, .{ .chip_id = irqchip });
+        try send_ioctl(self.vmfd, KVM_GET_IRQCHIP, @ptrToInt(&chip));
+        return chip;
     }
 
     pub fn get_klapic(ctx: *anyopaque) !LapicState {

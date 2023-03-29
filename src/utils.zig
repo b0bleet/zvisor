@@ -1,50 +1,30 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const os = std.os;
-const system = os.system;
-const ioctl = system.ioctl;
-const errno = system.getErrno;
 const assert = std.debug.assert;
-const mem = std.mem;
+
+const OS_Linux = @import("utils/linux.zig");
+
+const ARCH_x86_64 = @import("utils/x86_64.zig");
 
 pub const UtilsError = error{
     IoCtlErr,
+};
+
+pub const OS = switch (builtin.target.os.tag) {
+    .linux => OS_Linux,
+    else => @compileError("unsupported OS for syscall handler"),
+};
+
+pub const ARCH = switch (builtin.target.cpu.arch) {
+    .x86_64 => ARCH_x86_64,
+    else => @compileError("unsupported OS for syscall handler"),
 };
 
 pub fn fatal(comptime fmt_string: []const u8, args: anytype) noreturn {
     const stderr = std.io.getStdErr().writer();
     stderr.print("error: " ++ fmt_string ++ "\n", args) catch {};
     os.exit(1);
-}
-
-pub fn send_ioctl_res(fd_: os.fd_t, request: c_ulong, arg: usize) UtilsError!usize {
-    const fd = @bitCast(usize, @as(isize, fd_));
-    if (builtin.os.tag == .linux) {
-        while (true) {
-            const rc = os.linux.syscall3(.ioctl, fd, request, arg);
-            switch (errno(rc)) {
-                .SUCCESS => return rc,
-                .INTR => continue,
-                else => return UtilsError.IoCtlErr,
-            }
-        }
-    }
-    unreachable;
-}
-
-pub fn send_ioctl(fd_: os.fd_t, request: c_ulong, arg: usize) UtilsError!void {
-    const fd = @bitCast(usize, @as(isize, fd_));
-    if (builtin.os.tag == .linux) {
-        while (true) {
-            const rc = os.linux.syscall3(.ioctl, fd, request, arg);
-            switch (errno(rc)) {
-                .SUCCESS => return,
-                .INTR => continue,
-                else => return UtilsError.IoCtlErr,
-            }
-        }
-    }
-    unreachable;
 }
 
 pub fn read_file(
@@ -57,7 +37,7 @@ pub fn read_file(
     return try f.readToEndAlloc(allocator, stats.size);
 }
 
-pub fn alloc_mem(size: usize, fd: ?std.fs.File) os.MMapError![]align(mem.page_size) u8 {
+pub fn alloc_mem(size: usize, fd: ?std.fs.File) os.MMapError![]align(std.mem.page_size) u8 {
     const file = if (fd) |_fd| _fd.handle else -1;
     const vm_mem = os.mmap(
         null,

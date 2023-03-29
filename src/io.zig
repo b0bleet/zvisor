@@ -2,17 +2,22 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const serial = @import("devices/serial.zig");
 const i8042dev = @import("devices/i8042.zig");
+const vfio_pci = @import("devices/vfio_pci.zig");
 const console_controller = @import("console_controller.zig");
 const interrupt_controller = @import("devices/interrupt_controller.zig");
 const interrupt = @import("interrupt.zig");
 const InterruptManager = interrupt.InterruptManager;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
+const os = std.os;
 
 const ConsoleController = console_controller.ConsoleController;
+const ConsoleMode = console_controller.ConsoleMode;
 const SerialDevice = serial.SerialDevice;
 const i8042Device = i8042dev.i8042Device;
 const InterruptController = interrupt_controller.InterruptController;
+
+pub extern fn cfmakeraw(*std.os.termios) void;
 
 pub const IoReqType = enum {
     Read,
@@ -72,7 +77,7 @@ pub const DeviceControl = struct {
                 if (dev.vtable.write) |write| return try write(dev.ptr, port -% dev.base, dev.base, slice_data);
             },
         }
-        utils.fatal("Invalid IO request: port {} direction: {}\n", .{ port, direction });
+        utils.fatal("Invalid IO/MMIO request: port {} direction: {}\n", .{ port, direction });
     }
 
     pub fn deinit(self: *Self) void {
@@ -101,7 +106,7 @@ pub const DeviceManager = struct {
         };
     }
 
-    pub fn create_devices(self: *@This()) anyerror!void {
+    pub fn create_devices(self: *@This(), console_mode: ConsoleMode) anyerror!void {
         var i8042_dev = self.allocator.create(i8042Device) catch |err| return err;
         errdefer self.allocator.destroy(i8042_dev);
         i8042_dev.* = i8042Device.init();
@@ -117,7 +122,15 @@ pub const DeviceManager = struct {
         serial_dev.* = serial.SerialDevice.init(self.allocator, self.intr_manager);
         try self.io_bus.add_dev(serial_dev.dev());
 
-        var console_control = try ConsoleController.init(.Tty, serial_dev);
+        switch (console_mode) {
+            .Tty => {
+                const stdin = std.io.getStdIn().handle;
+                try self.setup_tty(stdin);
+            },
+            else => @panic("unsupported console mode"),
+        }
+
+        var console_control = try ConsoleController.init(console_mode, serial_dev);
         if (console_control) |*console| {
             self.console_handle = console.*;
             try console.start_thread();
@@ -136,9 +149,24 @@ pub const DeviceManager = struct {
         }
     }
 
+    pub fn setup_tty(self: *@This(), fd: std.os.fd_t) !void {
+        // set up raw mode for terminal
+        try self.modify_mode(fd, cfmakeraw);
+    }
+
     pub fn deinit(self: *@This()) void {
         self.io_bus.deinit();
         self.mmio_bus.deinit();
+    }
+
+    fn modify_mode(_: *@This(), fd: os.fd_t, comptime f: fn (*os.termios) callconv(.C) void) !void {
+        if (os.isatty(fd) != true) {
+            return;
+        }
+        const orig_term = try os.tcgetattr(fd);
+        var term = orig_term;
+        f(&term);
+        try os.tcsetattr(fd, std.os.TCSA.NOW, term);
     }
 };
 

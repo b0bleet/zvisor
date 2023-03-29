@@ -8,7 +8,7 @@ const serial = @import("devices/serial.zig");
 
 const SerialDevice = serial.SerialDevice;
 
-const ConsoleMode = enum {
+pub const ConsoleMode = enum {
     Tty,
     Pty,
 };

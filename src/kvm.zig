@@ -9,13 +9,19 @@ const fatal = utils.fatal;
 const mem = std.mem;
 const assert = std.debug.assert;
 
+const OS = utils.OS;
+const ARCH = utils.ARCH;
+const Config = @import("root").Config;
+
 const Vm = zig_vm.Vm;
 const Accel = zig_vm.Accel;
 const LapicState = zig_vm.LapicState;
 
+const ZvCpuid = zig_vm.ZvCpuid;
+
 // Utils API
-const send_ioctl_res = utils.send_ioctl_res;
-const send_ioctl = utils.send_ioctl;
+const send_ioctl_res = OS.send_ioctl_res;
+const send_ioctl = OS.send_ioctl;
 
 // KVM API
 const kvm_regs = c_kvm.kvm_regs;
@@ -377,27 +383,51 @@ pub const Kvm = struct {
         return cpuid;
     }
 
-    /// In case of trying to discover details of the processor
-    /// during initialization CPUID entries should be intialized.
-    fn init_cpuid(self: *Self) anyerror!void {
-        var i: u32 = 0;
+    fn patch_kvm_cpuid(_: *Self, cpuid: *const ZvCpuid.Cpuid, kvm_cpuids: []kvm_cpuid_entry2) bool {
+        assert(kvm_cpuids.len > 0);
+        var found = false;
+
+        for (kvm_cpuids) |*entry| {
+            if (cpuid.Function == entry.function) {
+                entry.eax = cpuid.Eax;
+                entry.ebx = cpuid.Ebx;
+                entry.ecx = cpuid.Ecx;
+                entry.edx = cpuid.Edx;
+                found = true;
+            }
+        }
+        return found;
+    }
+
+    fn set_cpuids(ctx: *anyopaque, cpuids: std.ArrayList(zig_vm.ZvCpuid.Cpuid)) anyerror!void {
+        const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
         var max_entries: u32 = 1;
         blk: while (try self.get_cpuid(max_entries)) |cpuid| {
-            const cpuid_ptr = @ptrCast(*kvm_cpuid, cpuid.ptr);
+            var cpuid_ptr = @ptrCast(*kvm_cpuid, cpuid.ptr);
             if (cpuid_ptr.nent >= max_entries) {
                 self.allocator.free(cpuid);
                 max_entries *= 2;
             } else {
-                const ptr = @ptrCast([*]kvm_cpuid_entry2, @alignCast(@alignOf(*kvm_cpuid_entry2), &cpuid_ptr.entries));
-                while (i < cpuid_ptr.nent) : (i += 1) {
-                    const entry = &ptr[i];
-                    _ = entry;
+                if (cpuid_ptr.nent == 0) break :blk;
+
+                var kvm_cpuids = @ptrCast(
+                    [*]kvm_cpuid_entry2,
+                    @alignCast(@alignOf(*kvm_cpuid_entry2), &cpuid_ptr.entries),
+                )[0..cpuid_ptr.nent];
+
+                if (cpuids.items.len > 0) {
+                    for (cpuids.items) |item| {
+                        if (!self.patch_kvm_cpuid(&item, kvm_cpuids)) {
+                            @panic("Invalid cpuid to be patched");
+                        }
+                    }
                 }
+
+                try send_ioctl(self.vcpufd, KVM_SET_CPUID2, @ptrToInt(cpuid.ptr));
                 self.allocator.free(cpuid);
                 break :blk;
             }
         }
-        try self.zvm_cpuids();
     }
 
     fn check_kvm_ext(self: *Self, ext: u32) bool {
@@ -406,73 +436,6 @@ pub const Kvm = struct {
             else => unreachable,
         };
         return true;
-    }
-
-    fn zvm_cpuids(self: *Self) !void {
-        const cpuids = struct {
-            nent: u32,
-            padding: u32,
-            entries: [max_cpuid_entries]kvm_cpuid_entry2,
-        };
-        comptime var nent = 0;
-        var cpuid = std.mem.zeroes(cpuids);
-        cpuid.nent = cpuid.entries.len;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = 0,
-            .eax = 0x1b,
-            .ebx = 0x756e6547,
-            .ecx = 0x06c65746e,
-            .edx = 0x49656e69,
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = 1,
-            .eax = 0x60fb1,
-            .ebx = 0x800,
-            .ecx = 0x80202001,
-            .edx = 0x78bfbfd,
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = 2,
-            .eax = 0x1,
-            .ecx = 0x4d,
-            .edx = 0x2c307d,
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = 0x80000000,
-            .eax = 0x80000008,
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = 0x80000001,
-            .ecx = 0x121,
-            .edx = 0x2c100800,
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = KVM_CPUID_SIGNATURE,
-            .eax = KVM_CPUID_FEATURES,
-            .ebx = 0x4b4d564b, // KVMK
-            .ecx = 0x564b4d56, // VMKV
-            .edx = 0x4d, // M
-        });
-        nent += 1;
-
-        cpuid.entries[nent] = std.mem.zeroInit(kvm_cpuid_entry2, .{
-            .function = KVM_CPUID_FEATURES,
-            .eax = 0x100007b,
-        });
-        nent += 1;
-
-        try send_ioctl(self.vcpufd, KVM_SET_CPUID2, @ptrToInt(&cpuid));
     }
 
     fn init_fw_regs(self: *Self) anyerror!void {
@@ -553,8 +516,10 @@ pub const Kvm = struct {
             initrd_max = lowmem - 1;
         }
 
+        assert(linux_config_phys < self.vm.vm_mem_size);
         const config_area = @intToPtr(*boot_config, @ptrToInt(self.vm.vm_mem_ptr.ptr) + linux_config_phys);
 
+        assert(cmdline_addr < self.vm.vm_mem_size);
         if (cmdline) |cmd| {
             const cmdline_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + cmdline_addr);
             @memcpy(cmdline_area, cmd.ptr, cmd.len);
@@ -592,6 +557,7 @@ pub const Kvm = struct {
             }
 
             const initrd_addr = (initrd_max - initrd_size) & ~@as(u32, 4095);
+            assert(initrd_addr < self.vm.vm_mem_size);
             config_area.initrd_size = initrd_size;
             config_area.initrd_addr = initrd_addr;
             const initrd_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + initrd_addr);
@@ -608,9 +574,11 @@ pub const Kvm = struct {
         setup_size = (setup_size + 1) * 512;
         assert(setup_size < kernel_size);
         kernel_size = kernel_size - setup_size;
+        assert(real_addr < self.vm.vm_mem_size);
         const setup_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + real_addr);
         @memcpy(setup_area, kernel.ptr, setup_size);
 
+        assert(prot_addr < self.vm.vm_mem_size);
         const kernel_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + prot_addr);
         @memcpy(kernel_area, @intToPtr([*]u8, (@ptrToInt(kernel.ptr) + setup_size)), kernel_size);
 
@@ -686,6 +654,9 @@ pub const Kvm = struct {
                         zv_run.u_flds.mmio.len,
                     );
                 },
+                .Shutdown => {
+                    std.debug.print("Shutdown\n", .{});
+                },
                 else => {
                     std.debug.print("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
                     unreachable;
@@ -715,8 +686,8 @@ pub const Kvm = struct {
 
     fn setup_ioapic(ctx: *anyopaque) !void {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
-        const irq_ioapic = try self.get_irqchip(KVM_IRQCHIP_IOAPIC);
-        _ = irq_ioapic;
+        const ioapic = try self.get_irqchip(KVM_IRQCHIP_IOAPIC);
+        try self.set_irqchip(&ioapic);
     }
 
     fn get_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32) u32 {
@@ -739,7 +710,7 @@ pub const Kvm = struct {
         try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
     }
 
-    fn set_irqchip(self: *Self, chip: *kvm_irqchip) !void {
+    fn set_irqchip(self: *Self, chip: *const kvm_irqchip) !void {
         try send_ioctl(self.vmfd, KVM_SET_IRQCHIP, @ptrToInt(chip));
     }
 
@@ -760,12 +731,15 @@ pub const Kvm = struct {
         return Accel{
             .ptr = self,
             .vtable = &.{
-                .get_klapic = get_klapic,
-                .get_klapic_reg = get_klapic_reg,
-                .set_klapic_reg = set_klapic_reg,
-                .set_klapic = set_klapic,
+                .apic = .{
+                    .get_klapic = get_klapic,
+                    .get_klapic_reg = get_klapic_reg,
+                    .set_klapic_reg = set_klapic_reg,
+                    .set_klapic = set_klapic,
+                    .setup_ioapic = setup_ioapic,
+                },
+                .set_cpuids = set_cpuids,
                 .inject_interrupt = inject_interrupt,
-                .setup_ioapic = setup_ioapic,
             },
         };
     }
@@ -773,9 +747,7 @@ pub const Kvm = struct {
     pub fn setup_vm(
         self: *Self,
         allocator: std.mem.Allocator,
-        kernel: []u8,
-        initrd: ?[]u8,
-        cmdline: ?[]u8,
+        config: *const Config,
     ) anyerror!void {
         self.vmfd = try self.create_vm();
 
@@ -813,11 +785,10 @@ pub const Kvm = struct {
 
         self.setup_vcpu_mem() catch |err| fatal("unable to initialize vcpu memory area: {}", .{err});
 
-        const initrd_file = if (initrd) |filename| try utils.read_file(allocator, filename) else null;
-        const kernel_file = try utils.read_file(allocator, kernel);
+        const initrd_file = if (config.initrd) |filename| try utils.read_file(allocator, filename) else null;
+        const kernel_file = try utils.read_file(allocator, config.kernel);
         defer allocator.free(kernel_file);
-        self.setup_linux_boot(kernel_file, initrd_file, cmdline);
+        self.setup_linux_boot(kernel_file, initrd_file, config.cmdline);
         try self.init_fw_regs();
-        try self.init_cpuid();
     }
 };

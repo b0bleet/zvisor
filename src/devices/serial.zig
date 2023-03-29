@@ -65,6 +65,7 @@ pub const SerialDevice = struct {
     out: fs.File.Writer,
     interrupt: *interrupt.InterruptManager,
     irq: u32,
+    irq_status: u32,
     m: std.Thread.Mutex = .{},
 
     pub fn init(allocator: std.mem.Allocator, intr_manager: *interrupt.InterruptManager) SerialDevice {
@@ -82,6 +83,7 @@ pub const SerialDevice = struct {
             .out = std.io.getStdOut().writer(),
             .interrupt = intr_manager,
             .irq = 4,
+            .irq_status = 0,
         };
     }
 
@@ -107,6 +109,7 @@ pub const SerialDevice = struct {
             try self.in_buf.appendSlice(bytes.*);
             try self.recv_data();
         }
+        try self.update_irq();
     }
 
     fn dlab_set(self: *@This()) bool {
@@ -161,13 +164,14 @@ pub const SerialDevice = struct {
     }
 
     fn update_irq(self: *@This()) !void {
-        if (!self.is_thr_intr_enabled() and self.is_thr_iir_enabled()) {
+        if (!self.is_thr_intr_enabled() and self.irq_status != 0) {
             try self.trigger_interrupt(0);
         }
     }
 
     fn trigger_interrupt(self: *@This(), level: u8) anyerror!void {
         try self.interrupt.trigger(self.irq, level);
+        self.irq_status = self.intr_enable;
     }
 
     fn popFrontOrNull(self: *@This()) ?@TypeOf(self.in_buf.items[0]) {

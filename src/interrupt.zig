@@ -22,9 +22,10 @@ pub const InterruptManager = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn setup(self: *@This()) !void {
+    pub fn setup_apic(self: *@This()) !void {
         const vcpu = self.accel.vtable;
-        try vcpu.setup_ioapic(self.accel.ptr);
+        const apic = vcpu.apic orelse return;
+        try apic.setup_ioapic(self.accel.ptr);
     }
 
     pub fn trigger(self: *@This(), irq: u32, level: u32) !void {
@@ -39,14 +40,17 @@ inline fn deliv_mode(reg: u32, mode: u32) u32 {
 
 pub fn set_lint(accel: *const Accel) !void {
     const vcpu = accel.vtable;
-    var kapic = try vcpu.get_klapic(accel.ptr);
-    vcpu.set_klapic_reg(accel.ptr, &kapic, APIC_SPIV, 0x1ff);
+    const apic = vcpu.apic orelse return;
 
-    const lvt0 = vcpu.get_klapic_reg(accel.ptr, &kapic, APIC_LVT0);
-    vcpu.set_klapic_reg(accel.ptr, &kapic, APIC_LVT0, deliv_mode(lvt0, APIC_MODE_EXTINT));
+    var kapic = try apic.get_klapic(accel.ptr);
 
-    const lvt1 = vcpu.get_klapic_reg(accel.ptr, &kapic, APIC_LVT1);
-    vcpu.set_klapic_reg(accel.ptr, &kapic, APIC_LVT1, deliv_mode(lvt1, APIC_MODE_NMI));
+    apic.set_klapic_reg(accel.ptr, &kapic, APIC_SPIV, 0x1ff);
 
-    try vcpu.set_klapic(accel.ptr, &kapic);
+    const lvt0 = apic.get_klapic_reg(accel.ptr, &kapic, APIC_LVT0);
+    apic.set_klapic_reg(accel.ptr, &kapic, APIC_LVT0, deliv_mode(lvt0, APIC_MODE_EXTINT));
+
+    const lvt1 = apic.get_klapic_reg(accel.ptr, &kapic, APIC_LVT1);
+    apic.set_klapic_reg(accel.ptr, &kapic, APIC_LVT1, deliv_mode(lvt1, APIC_MODE_NMI));
+
+    try apic.set_klapic(accel.ptr, &kapic);
 }

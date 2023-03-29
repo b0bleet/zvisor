@@ -182,8 +182,11 @@ pub fn main() anyerror!void {
         else => fatal("unable to initialize vm context: {}", .{err}),
     };
 
-    vm_ctx.run_vm(allocator, config) catch |err| fatal("unable to run vm: {}\n", .{err});
+    vm_ctx.run_vm(allocator, &config) catch |err| fatal("unable to run vm: {}\n", .{err});
     defer vm_ctx.deinit();
+
+    try stdout.print("exited\n", .{});
+    std.process.exit(1);
 }
 
 test "simple test" {}

@@ -134,6 +134,8 @@ pub const DeviceManager = struct {
         if (console_control) |*console| {
             self.console_handle = console.*;
             try console.start_thread();
+        } else {
+            std.debug.print("unable to initialize console manager\n", .{});
         }
     }
 

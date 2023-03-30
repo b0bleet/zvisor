@@ -390,17 +390,28 @@ pub const Kvm = struct {
         return cpuid;
     }
 
-    fn patch_kvm_cpuid(_: *Self, cpuid: *const ZvCpuid.Cpuid, kvm_cpuids: []kvm_cpuid_entry2) bool {
+    fn patch_kvm_cpuid(_: *Self, cpuids: std.ArrayList(zig_vm.ZvCpuid.Cpuid), kvm_cpuids: []kvm_cpuid_entry2) bool {
         assert(kvm_cpuids.len > 0);
         var found = false;
 
-        for (kvm_cpuids) |*entry| {
-            if (cpuid.Function == entry.function) {
-                entry.eax = cpuid.Eax;
-                entry.ebx = cpuid.Ebx;
-                entry.ecx = cpuid.Ecx;
-                entry.edx = cpuid.Edx;
-                found = true;
+        for (cpuids.items) |cpuid| {
+            for (kvm_cpuids) |*entry| {
+                if (cpuid.Function == entry.function or
+                    (cpuid.Index != null and cpuid.Index == entry.index))
+                {
+                    if (cpuid.SetBits) {
+                        if (cpuid.Eax) |Eax| entry.eax |= Eax;
+                        if (cpuid.Ebx) |Ebx| entry.ebx |= Ebx;
+                        if (cpuid.Ecx) |Ecx| entry.ecx |= Ecx;
+                        if (cpuid.Edx) |Edx| entry.edx |= Edx;
+                    } else {
+                        if (cpuid.Eax) |Eax| entry.eax = Eax;
+                        if (cpuid.Ebx) |Ebx| entry.ebx = Ebx;
+                        if (cpuid.Ecx) |Ecx| entry.ecx = Ecx;
+                        if (cpuid.Edx) |Edx| entry.edx = Edx;
+                    }
+                    found = true;
+                }
             }
         }
         return found;
@@ -422,22 +433,9 @@ pub const Kvm = struct {
                     @alignCast(@alignOf(*kvm_cpuid_entry2), &cpuid_ptr.entries),
                 )[0..cpuid_ptr.nent];
 
-                for (kvm_cpuids, 0..) |entry, idx| {
-                    std.debug.print("entry idx {d} function {x} eax {x} ebx {x} ecx {x} edx {x}\n", .{
-                        idx,
-                        entry.function,
-                        entry.eax,
-                        entry.ebx,
-                        entry.ecx,
-                        entry.edx,
-                    });
-                }
-
                 if (cpuids.items.len > 0) {
-                    for (cpuids.items) |item| {
-                        if (!self.patch_kvm_cpuid(&item, kvm_cpuids)) {
-                            @panic("Invalid cpuid to be patched");
-                        }
+                    if (!self.patch_kvm_cpuid(cpuids, kvm_cpuids)) {
+                        std.debug.print("unable to find cpuid entry to patch\n", .{});
                     }
                 }
 

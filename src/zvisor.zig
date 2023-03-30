@@ -68,13 +68,14 @@ pub const ZvCpuid = struct {
     };
 
     pub const Cpuid = struct {
+        SetBits: bool = false,
         Function: u32,
-        Index: u32,
-        Flags: u32,
-        Eax: u32,
-        Ebx: u32,
-        Ecx: u32,
-        Edx: u32,
+        Index: ?u32 = null,
+        Flags: ?u32 = null,
+        Eax: ?u32 = null,
+        Ebx: ?u32 = null,
+        Ecx: ?u32 = null,
+        Edx: ?u32 = null,
     };
 
     cpuids: std.ArrayList(Cpuid),
@@ -253,12 +254,22 @@ pub const Vm = struct {
         var zvcpuids = ZvCpuid.init(allocator);
         defer zvcpuids.deinit();
 
-        try zvcpuids.set_regs(std.mem.zeroInit(ZvCpuid.Cpuid, .{
+        try zvcpuids.set_regs(.{
             .Function = 0x7,
             .Ebx = 0xf0bf47ab,
             .Ecx = 0x405f4e,
             .Edx = 0xac000400,
-        }));
+        });
+
+        try zvcpuids.set_regs(.{
+            .Function = 0xa,
+        });
+
+        try zvcpuids.set_regs(.{
+            .Function = 0x1,
+            .SetBits = true,
+            .Ecx = 1 << 31, // Enable hypervisor feature
+        });
 
         try vcpu.set_cpuids(accel.ptr, zvcpuids.cpuids);
     }

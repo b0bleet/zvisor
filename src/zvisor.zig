@@ -204,24 +204,27 @@ pub const Vm = struct {
         OS.register_signal(OS.sigrtmin(), signal_handler);
 
         const accel = kvm_ctx.get_accel();
-
         self.intr_manager = try interrupt.InterruptManager.init(&accel, allocator);
         errdefer allocator.destroy(self.intr_manager);
-
         const vcpu = accel.vtable;
         if (vcpu.apic != null) {
             try interrupt.set_lint(&accel);
             try self.intr_manager.setup_apic();
+        } else {
+            std.debug.print("unable to initialize apic\n", .{});
         }
 
         try self.prep_cpuid(allocator, &accel);
 
         // Set up `Devices` object and initalize all PCI buses
         self.init_devices(allocator) catch |err| utils.fatal("unable to initialize PCI devices: {}\n", .{err});
-
         defer if (self.dev_manager.console_handle) |console| console.handle.join();
-
-        kvm_ctx.run_vm() catch |err| fatal("unable to run VM with KVM accelerator: {}", .{err});
+        kvm_ctx.run_vm() catch |err| switch (err) {
+            error.FailIoReq => fatal("unable to send ioctl: {}", .{err}),
+            error.FailMmioReq => fatal("unable to handle io request: {}", .{err}),
+            error.FailVmRun => fatal("unable to run VM: {}", .{err}),
+            error.FailGetRegs => fatal("unable to get registers from accelerator: {}", .{err}),
+        };
     }
 
     pub fn deinit(self: *Vm) void {
@@ -252,7 +255,6 @@ pub const Vm = struct {
 
         try zvcpuids.set_regs(std.mem.zeroInit(ZvCpuid.Cpuid, .{
             .Function = 0x7,
-            .Eax = 0x0,
             .Ebx = 0xf0bf47ab,
             .Ecx = 0x405f4e,
             .Edx = 0xac000400,

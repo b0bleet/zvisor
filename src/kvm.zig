@@ -62,6 +62,13 @@ const KVM_IRQCHIP_IOAPIC = c_kvm.KVM_IRQCHIP_IOAPIC;
 const KVM_GET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x62), kvm_irqchip);
 const KVM_SET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x63), kvm_irqchip);
 
+pub const VmRunErr = error{
+    FailIoReq,
+    FailMmioReq,
+    FailVmRun,
+    FailGetRegs,
+};
+
 const ZVisorExit = enum {
     Unknown,
     Exception,
@@ -415,6 +422,17 @@ pub const Kvm = struct {
                     @alignCast(@alignOf(*kvm_cpuid_entry2), &cpuid_ptr.entries),
                 )[0..cpuid_ptr.nent];
 
+                for (kvm_cpuids, 0..) |entry, idx| {
+                    std.debug.print("entry idx {d} function {x} eax {x} ebx {x} ecx {x} edx {x}\n", .{
+                        idx,
+                        entry.function,
+                        entry.eax,
+                        entry.ebx,
+                        entry.ecx,
+                        entry.edx,
+                    });
+                }
+
                 if (cpuids.items.len > 0) {
                     for (cpuids.items) |item| {
                         if (!self.patch_kvm_cpuid(&item, kvm_cpuids)) {
@@ -625,11 +643,11 @@ pub const Kvm = struct {
         return regs;
     }
 
-    pub fn run_vm(self: *Self) anyerror!void {
+    pub fn run_vm(self: *Self) VmRunErr!void {
         vm_run: while (true) {
-            try send_ioctl(self.vcpufd, KVM_RUN, 0);
+            send_ioctl(self.vcpufd, KVM_RUN, 0) catch return error.FailVmRun;
             const exit_reason = self.run.exit_reason;
-            var regs = try self.get_regs();
+            var regs = self.get_regs() catch return error.FailGetRegs;
             const zv_run = @ptrCast(*kvm_run, @alignCast(@alignOf(kvm_run), self.run));
             switch (@intToEnum(ZVisorExit, exit_reason)) {
                 .Hlt => {
@@ -638,21 +656,21 @@ pub const Kvm = struct {
                 },
                 .Io => exit_io: {
                     const io_data = @intToPtr([*]u8, @ptrToInt(zv_run) + zv_run.u_flds.io.data_offset);
-                    try self.vm.dev_manager.handle_io_req(
+                    self.vm.dev_manager.handle_io_req(
                         @intToEnum(io.IoReqType, zv_run.u_flds.io.direction),
                         zv_run.u_flds.io.port,
                         io_data,
                         (zv_run.u_flds.io.size * zv_run.u_flds.io.count),
-                    );
+                    ) catch return error.FailIoReq;
                     break :exit_io;
                 },
                 .Mmio => {
-                    try self.vm.dev_manager.handle_mmio_req(
+                    self.vm.dev_manager.handle_mmio_req(
                         @intToEnum(io.IoReqType, zv_run.u_flds.mmio.is_write),
                         zv_run.u_flds.mmio.phys_addr,
                         &zv_run.u_flds.mmio.data,
                         zv_run.u_flds.mmio.len,
-                    );
+                    ) catch return error.FailMmioReq;
                 },
                 .Shutdown => {
                     std.debug.print("Shutdown\n", .{});

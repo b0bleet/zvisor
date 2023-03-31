@@ -20,16 +20,6 @@ const DeviceManager = io.DeviceManager;
 const IoReqType = io.IoReqType;
 const InterruptManager = interrupt.InterruptManager;
 
-pub const MsrEntry = struct {
-    index: u32,
-    data: u64,
-};
-
-pub const VcpuState = struct {
-    cpu_id: u32,
-    msrs: std.ArrayList(MsrEntry),
-};
-
 const mib_unit = 1024 * 1024;
 const gib_unit = 1024 * 1024 * 1024;
 
@@ -145,15 +135,12 @@ pub const Vm = struct {
     fw_phys_mem_area: u20,
     /// Allocated memory region for virtual machine
     vm_mem_ptr: []align(mem.page_size) u8 = undefined,
-    /// Default VM memory size is 512 MB
-    /// that will be extended via command-line argument.
-    vm_mem_size: usize,
-    fw_mem_size: usize = undefined,
     /// Allocate memory area for binary file.
     /// Then extract firmware binary file and filling
     /// allocated memory area with that binary file
-    vcpu_state: std.ArrayList(VcpuState),
-    pub fn init(allocator: mem.Allocator, config: Config, vcpu: std.ArrayList(VcpuState)) !Self {
+    vm_mem_size: usize,
+    fw_mem_size: usize = undefined,
+    pub fn init(allocator: mem.Allocator, config: Config) !Self {
         const fw_phys_mem_area = 0xf0000;
         const fw = config.firmware;
         const mem_size = config.memory;
@@ -187,7 +174,6 @@ pub const Vm = struct {
 
         return Self{
             .fw_phys_mem_area = fw_phys_mem_area,
-            .vcpu_state = vcpu,
             .fw_mem_size = firmware.len,
             .vm_mem_ptr = vm_mem,
             .vm_mem_size = vm_mem_size,
@@ -198,9 +184,9 @@ pub const Vm = struct {
         // Initialize VM accelerator
         // At the moment KVM will be used by default
         // Initialize KVM context
-        var kvm_ctx = kvm.Kvm.init(allocator, self) catch |err| fatal("unable to initialize kvm context: {}", .{err});
+        var kvm_ctx = kvm.Kvm.init(allocator, self, config.cpus) catch |err| fatal("unable to initialize kvm context: {}", .{err});
         defer kvm_ctx.deinit();
-        kvm_ctx.setup_vm(allocator, config) catch |err| fatal("unable to run accelerator: {}", .{err});
+        try kvm_ctx.setup_vm(allocator, config);
 
         OS.register_signal(OS.sigrtmin(), signal_handler);
 
@@ -232,14 +218,6 @@ pub const Vm = struct {
         os.munmap(self.vm_mem_ptr);
         self.dev_manager.deinit();
         self.intr_manager.deinit();
-
-        // iterate over vcpus and deallocate msr entries
-        if (self.vcpu_state.items.len != 0) {
-            for (self.vcpu_state.items) |vcpu| {
-                vcpu.msrs.deinit();
-            }
-        }
-        self.vcpu_state.deinit();
     }
 
     // Initialize MMIO and I/O devices with Device Manager

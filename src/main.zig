@@ -34,6 +34,7 @@ pub const Config = struct {
     initrd: ?[]u8 = undefined,
     cmdline: ?[]u8 = undefined,
     memory: ?[]u8 = undefined,
+    cpus: u8 = 1,
     err: bool = false,
     err_str: []u8 = undefined,
 };
@@ -169,13 +170,7 @@ pub fn main() anyerror!void {
         std.process.exit(2);
     }
 
-    const cpus = 1;
-    // Setup Linux based VM context and run that on the VMM
-    const vcpu_state = std.ArrayList(vm.VcpuState).initCapacity(allocator, cpus) catch |err| {
-        utils.fatal("Unable to allocate VcpuState: {}", .{err});
-    };
-
-    var vm_ctx = Vm.init(allocator, config, vcpu_state) catch |err| switch (err) {
+    var vm_ctx = Vm.init(allocator, config) catch |err| switch (err) {
         error.FileNotFound => {
             fatal("The specified firmware file could not be found.\n", .{});
         },

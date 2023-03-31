@@ -6,7 +6,6 @@ const utils = @import("utils.zig");
 const io = @import("io.zig");
 const zig_vm = @import("zvisor.zig");
 const fatal = utils.fatal;
-const mem = std.mem;
 const assert = std.debug.assert;
 
 const OS = utils.OS;
@@ -24,12 +23,12 @@ const send_ioctl_res = OS.send_ioctl_res;
 const send_ioctl = OS.send_ioctl;
 
 // KVM API
-const kvm_regs = c_kvm.kvm_regs;
-const kvm_sregs = c_kvm.kvm_sregs;
-const kvm_userspace_memory_region = c_kvm.kvm_userspace_memory_region;
-const kvm_cpuid_entry2 = c_kvm.kvm_cpuid_entry2;
-const kvm_pit_config = c_kvm.kvm_pit_config;
-const kvm_lapic_state = c_kvm.kvm_lapic_state;
+const KvmRegs = c_kvm.kvm_regs;
+const KvmSregs = c_kvm.kvm_sregs;
+const KvmUserSpaceMemoryRegion = c_kvm.kvm_userspace_memory_region;
+const KvmCpuidEntry2 = c_kvm.kvm_cpuid_entry2;
+const KvmPitConfig = c_kvm.kvm_pit_config;
+const KvmLapicState = c_kvm.kvm_lapic_state;
 
 const KVM_GET_SUPPORTED_CPUID = c_kvm.KVM_GET_SUPPORTED_CPUID;
 const KVM_CREATE_VM = c_kvm.KVM_CREATE_VM;
@@ -59,8 +58,8 @@ const KVM_CAP_IRQ_INJECT_STATUS = c_kvm.KVM_CAP_IRQ_INJECT_STATUS;
 const KVM_IRQCHIP_IOAPIC = c_kvm.KVM_IRQCHIP_IOAPIC;
 
 // hacky way to call `KVM_GET_IRQCHIP/KVM_SET_IRQCHIP` ioctl command with modified `kvm_irqchip`
-const KVM_GET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x62), kvm_irqchip);
-const KVM_SET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x63), kvm_irqchip);
+const KVM_GET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x62), KvmIrqChip);
+const KVM_SET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x63), KvmIrqChip);
 
 pub const VmRunErr = error{
     FailIoReq,
@@ -110,7 +109,7 @@ const ZVisorExit = enum {
     Notify,
 };
 
-const kvm_pic_state = extern struct {
+const KvmPicState = extern struct {
     last_irr: u8, // edge detection
     irr: u8, // interrupt request register
     imr: u8, // interrupt mask register
@@ -129,8 +128,9 @@ const kvm_pic_state = extern struct {
     elcr_mask: u8,
 };
 
-const KvmIoApicNumPins = 24;
-const kvm_ioapic_state = extern struct {
+const KvmIoApicState = extern struct {
+    const KvmIoApicNumPins = 24;
+
     base_address: u64,
     ioregsel: u32,
     id: u32,
@@ -139,17 +139,17 @@ const kvm_ioapic_state = extern struct {
     redirtbl: [KvmIoApicNumPins]u64,
 };
 
-const kvm_irqchip = extern struct {
+const KvmIrqChip = extern struct {
     chip_id: u32,
     pad: u32,
     chip: extern union {
         dummy: [512]u8,
-        pic: kvm_pic_state,
-        ioapic: kvm_ioapic_state,
+        pic: KvmPicState,
+        ioapic: KvmIoApicState,
     },
 };
 
-pub const kvm_irq_level = extern struct {
+pub const KvmIrqLevel = extern struct {
     u_flds: extern union {
         irq: u32,
         level: u32,
@@ -158,7 +158,7 @@ pub const kvm_irq_level = extern struct {
 };
 
 // KVM run context structure
-pub const kvm_run = extern struct {
+pub const KvmRun = extern struct {
     request_interrupt_window: u8,
     immediate_exit: u8,
     padding1: [6]u8,
@@ -285,7 +285,7 @@ pub const kvm_run = extern struct {
 };
 
 // VM context during BIOS initialization stage
-const bios_ctx = struct {
+const BiosCtx = struct {
     const VM_FW_CS_BASE = 0xffff0000;
     const VM_FW_CS_SEL = 0xf000;
     const VM_FW_IP = 0xfff0;
@@ -299,7 +299,7 @@ const VmmError = error{
     VmmMemErr,
 };
 
-const e820_types = enum {
+const E820Types = enum {
     e820_ram,
     e820_reserved,
     e820_acpi,
@@ -307,7 +307,7 @@ const e820_types = enum {
     e820_unusable,
 };
 
-const kvm_mem = struct {
+const KvmMem = struct {
     slot: u32,
     mem: usize,
     phys_addr: usize,
@@ -315,33 +315,41 @@ const kvm_mem = struct {
     flags: u32,
 };
 
-const max_cpuid_entries = 100;
-const max_e820_entries = 1;
+const MsrEntry = struct {
+    index: u32,
+    data: u64,
+};
 
-const kvm_io_type = utils.get_field(utils.get_field(kvm_run, "u_flds"), "io");
+const VcpuState = struct {
+    cpu_id: u32,
+    msrs: std.ArrayList(MsrEntry),
+    vcpufd: os.fd_t,
+};
+
+const KvmCpuid = struct {
+    nent: u32,
+    padding: u32 = undefined,
+    entries: void = undefined, // should be zero-sized
+};
+
+const MaxCpuidEntries = 100;
+const MaxE820Entries = 1;
+
+const kvm_io_type = utils.get_field(utils.get_field(KvmRun, "u_flds"), "io");
 
 pub const Kvm = struct {
     const Self = @This();
-    const kvm_cpuid = struct {
-        nent: u32,
-        padding: u32 = undefined,
-        entries: void = undefined, // should be zero-sized
-    };
-    const kvm_state = struct {
-        irq_line: usize,
-    };
 
     vm: *Vm = undefined,
     kvmfd: os.fd_t,
     vmfd: c_int,
-    run: *kvm_run = undefined,
-    kvm_mmap: []align(mem.page_size) u8,
+    vcpu_run: []align(std.mem.page_size) u8,
     vcpufd: os.fd_t,
     allocator: std.mem.Allocator,
-    state: kvm_state,
     irq_ioctl: u32 = KVM_IRQ_LINE,
+    vcpu_state: std.ArrayList(VcpuState),
 
-    pub fn init(allocator: std.mem.Allocator, vm_ctx: *Vm) anyerror!Kvm {
+    pub fn init(allocator: std.mem.Allocator, vm_ctx: *Vm, cpus: u8) anyerror!Kvm {
         const flags: u32 = os.O.CLOEXEC | os.O.RDWR | os.O.DSYNC;
         var mode: os.mode_t = 0;
         const fd = try os.open("/dev/kvm", flags, mode);
@@ -350,12 +358,21 @@ pub const Kvm = struct {
             .allocator = allocator,
             .kvmfd = fd,
             .vm = vm_ctx,
+            .vcpu_state = try std.ArrayList(VcpuState).initCapacity(allocator, cpus),
         });
     }
 
     pub fn deinit(self: *Self) void {
         os.close(self.kvmfd);
-        os.munmap(self.kvm_mmap);
+        os.munmap(self.vcpu_run);
+
+        // iterate over vcpus and deallocate msr entries
+        if (self.vcpu_state.items.len != 0) {
+            for (self.vcpu_state.items) |vcpu| {
+                vcpu.msrs.deinit();
+            }
+        }
+        self.vcpu_state.deinit();
     }
 
     fn create_vm(self: *Self) utils.UtilsError!os.fd_t {
@@ -368,36 +385,36 @@ pub const Kvm = struct {
         return @intCast(os.fd_t, fd);
     }
 
-    fn add_mem_slot(self: *Self, kmem: kvm_mem) anyerror!void {
-        var region: kvm_userspace_memory_region = std.mem.zeroInit(kvm_userspace_memory_region, .{
+    fn add_mem_slot(self: *Self, kmem: KvmMem) anyerror!void {
+        var region: KvmUserSpaceMemoryRegion = .{
             .slot = kmem.slot,
             .guest_phys_addr = kmem.phys_addr,
             .memory_size = kmem.size,
             .flags = kmem.flags,
             .userspace_addr = kmem.mem,
-        });
+        };
         try send_ioctl(self.vmfd, KVM_SET_USER_MEMORY_REGION, @ptrToInt(&region));
     }
 
-    fn get_cpuid(self: *Self, max_entries: u32) anyerror!?[]align(@alignOf(kvm_cpuid)) u8 {
+    fn get_cpuid(self: *Self, max_entries: u32) anyerror!?[]align(@alignOf(KvmCpuid)) u8 {
         assert(max_entries > 0);
 
-        const calc_entries = @sizeOf(kvm_cpuid) + (max_entries * @sizeOf(kvm_cpuid_entry2));
-        const cpuid = try self.allocator.alignedAlloc(u8, @alignOf(kvm_cpuid), calc_entries);
-        const res = @ptrCast(*kvm_cpuid, cpuid.ptr);
+        const calc_entries = @sizeOf(KvmCpuid) + (max_entries * @sizeOf(KvmCpuidEntry2));
+        const cpuid = try self.allocator.alignedAlloc(u8, @alignOf(KvmCpuid), calc_entries);
+        const res = @ptrCast(*KvmCpuid, cpuid.ptr);
         res.* = .{ .nent = max_entries };
         try send_ioctl(self.kvmfd, KVM_GET_SUPPORTED_CPUID, @ptrToInt(cpuid.ptr));
         return cpuid;
     }
 
-    fn patch_kvm_cpuid(_: *Self, cpuids: std.ArrayList(zig_vm.ZvCpuid.Cpuid), kvm_cpuids: []kvm_cpuid_entry2) bool {
+    fn patch_kvm_cpuid(_: *Self, cpuids: std.ArrayList(zig_vm.ZvCpuid.Cpuid), kvm_cpuids: []KvmCpuidEntry2) bool {
         assert(kvm_cpuids.len > 0);
         var found = false;
 
         for (cpuids.items) |cpuid| {
             for (kvm_cpuids) |*entry| {
-                if (cpuid.Function == entry.function or
-                    (cpuid.Index != null and cpuid.Index == entry.index))
+                if (cpuid.Function == entry.function and
+                    (cpuid.Index == null or cpuid.Index == entry.index))
                 {
                     if (cpuid.SetBits) {
                         if (cpuid.Eax) |Eax| entry.eax |= Eax;
@@ -421,7 +438,7 @@ pub const Kvm = struct {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
         var max_entries: u32 = 1;
         blk: while (try self.get_cpuid(max_entries)) |cpuid| {
-            var cpuid_ptr = @ptrCast(*kvm_cpuid, cpuid.ptr);
+            var cpuid_ptr = @ptrCast(*KvmCpuid, cpuid.ptr);
             if (cpuid_ptr.nent >= max_entries) {
                 self.allocator.free(cpuid);
                 max_entries *= 2;
@@ -429,8 +446,8 @@ pub const Kvm = struct {
                 if (cpuid_ptr.nent == 0) break :blk;
 
                 var kvm_cpuids = @ptrCast(
-                    [*]kvm_cpuid_entry2,
-                    @alignCast(@alignOf(*kvm_cpuid_entry2), &cpuid_ptr.entries),
+                    [*]KvmCpuidEntry2,
+                    @alignCast(@alignOf(*KvmCpuidEntry2), &cpuid_ptr.entries),
                 )[0..cpuid_ptr.nent];
 
                 if (cpuids.items.len > 0) {
@@ -455,16 +472,16 @@ pub const Kvm = struct {
     }
 
     fn init_fw_regs(self: *Self) anyerror!void {
-        var sregs = std.mem.zeroes(kvm_sregs);
+        var sregs = std.mem.zeroes(KvmSregs);
         try send_ioctl(self.vcpufd, KVM_GET_SREGS, @ptrToInt(&sregs));
-        sregs.cs.base = bios_ctx.VM_FW_CS_BASE;
-        sregs.cs.selector = bios_ctx.VM_FW_CS_SEL;
+        sregs.cs.base = BiosCtx.VM_FW_CS_BASE;
+        sregs.cs.selector = BiosCtx.VM_FW_CS_SEL;
         try send_ioctl(self.vcpufd, KVM_SET_SREGS, @ptrToInt(&sregs));
 
-        var regs: kvm_regs = std.mem.zeroInit(kvm_regs, .{
-            .rip = bios_ctx.VM_FW_IP,
-            .rsp = bios_ctx.VM_FW_SP,
-            .rflags = bios_ctx.VM_FW_EFLAGS,
+        var regs = std.mem.zeroInit(KvmRegs, .{
+            .rip = BiosCtx.VM_FW_IP,
+            .rsp = BiosCtx.VM_FW_SP,
+            .rflags = BiosCtx.VM_FW_EFLAGS,
         });
         try send_ioctl(self.vcpufd, KVM_SET_REGS, @ptrToInt(&regs));
     }
@@ -488,7 +505,7 @@ pub const Kvm = struct {
             cmdline_addr: u32,
             kernel_addr: u32,
             initrd_addr: u32,
-            mem_map: [max_e820_entries]e820map,
+            mem_map: [MaxE820Entries]e820map,
         };
         comptime assert(@sizeOf(boot_config) <= 0x10000);
 
@@ -498,15 +515,15 @@ pub const Kvm = struct {
         var header: [8192]u8 = undefined;
         var kernel_size = @intCast(u32, kernel.len);
         @memcpy(@ptrCast([*]u8, &header), kernel.ptr, @min(header.len, kernel_size));
-        if (mem.readIntLittle(u32, &header[0x202]) != 0x53726448) {
+        if (std.mem.readIntLittle(u32, &header[0x202]) != 0x53726448) {
             fatal("ZigVisor does not support multiboot kernel loading\n", .{});
         }
-        const protocol: u16 = mem.readIntLittle(u16, &header[0x206]);
+        const protocol: u16 = std.mem.readIntLittle(u16, &header[0x206]);
 
         var cmdline_addr: u32 = undefined;
         var real_addr: u32 = undefined;
         var prot_addr: u32 = undefined;
-        if (protocol < 0x200 or !((mem.readIntLittle(u8, &header[0x211]) & 0x1) == 0x1)) {
+        if (protocol < 0x200 or !((std.mem.readIntLittle(u8, &header[0x211]) & 0x1) == 0x1)) {
             real_addr = 0x90000;
             cmdline_addr = 0x9a000 - cmdline_size;
             prot_addr = 0x10000;
@@ -602,24 +619,24 @@ pub const Kvm = struct {
         config_area.mem_map[0] = .{
             .addr = 0,
             .size = self.vm.vm_mem_size,
-            .type = @enumToInt(e820_types.e820_reserved),
+            .type = @enumToInt(E820Types.e820_reserved),
         };
 
-        config_area.cpus_count = @intCast(u32, self.vm.vcpu_state.items.len);
+        config_area.cpus_count = @intCast(u32, self.vcpu_state.items.len);
         config_area.kernel_addr = prot_addr;
         config_area.kernel_size = kernel_size;
         config_area.setup_size = setup_size;
         config_area.setup_addr = real_addr;
     }
 
-    fn setup_vcpu_mem(self: *Self) !void {
+    fn setup_vcpu_mem(self: *Self, vcpufd: i32) ![]align(std.mem.page_size) u8 {
         const size = try send_ioctl_res(self.kvmfd, KVM_GET_VCPU_MMAP_SIZE, @intCast(c_ulong, 0));
         const mmap = os.mmap(
             null,
             size,
             os.PROT.READ | os.PROT.WRITE,
             os.MAP.SHARED,
-            self.vcpufd,
+            vcpufd,
             0,
         ) catch |err| switch (err) {
             error.MemoryMappingNotSupported => unreachable,
@@ -631,12 +648,11 @@ pub const Kvm = struct {
         };
         assert(mmap.len == size);
         errdefer os.munmap(mmap);
-        self.kvm_mmap = mmap;
-        self.run = @ptrCast(*kvm_run, @alignCast(@alignOf(kvm_run), &mmap[0]));
+        return mmap;
     }
 
-    pub fn get_regs(self: *Self) !kvm_regs {
-        var regs: kvm_regs = undefined;
+    pub fn get_regs(self: *Self) !KvmRegs {
+        var regs: KvmRegs = undefined;
         try send_ioctl(self.vcpufd, KVM_GET_REGS, @ptrToInt(&regs));
         return regs;
     }
@@ -644,9 +660,10 @@ pub const Kvm = struct {
     pub fn run_vm(self: *Self) VmRunErr!void {
         vm_run: while (true) {
             send_ioctl(self.vcpufd, KVM_RUN, 0) catch return error.FailVmRun;
-            const exit_reason = self.run.exit_reason;
+            const run = @ptrCast(*KvmRun, @alignCast(@alignOf(KvmRun), &self.vcpu_run[0]));
+            const exit_reason = run.exit_reason;
             var regs = self.get_regs() catch return error.FailGetRegs;
-            const zv_run = @ptrCast(*kvm_run, @alignCast(@alignOf(kvm_run), self.run));
+            const zv_run = @ptrCast(*KvmRun, @alignCast(@alignOf(KvmRun), run));
             switch (@intToEnum(ZVisorExit, exit_reason)) {
                 .Hlt => {
                     std.debug.print("HLT instruction executed {x}\n", .{regs.rip});
@@ -670,9 +687,7 @@ pub const Kvm = struct {
                         zv_run.u_flds.mmio.len,
                     ) catch return error.FailMmioReq;
                 },
-                .Shutdown => {
-                    std.debug.print("Shutdown\n", .{});
-                },
+                .Shutdown => {},
                 else => {
                     std.debug.print("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
                     unreachable;
@@ -683,7 +698,7 @@ pub const Kvm = struct {
 
     fn inject_interrupt(ctx: *anyopaque, irq: u32, level: u32) anyerror!void {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
-        var event = std.mem.zeroes(kvm_irq_level);
+        var event = std.mem.zeroes(KvmIrqLevel);
         event.u_flds.irq = irq;
         event.level = level;
         try send_ioctl(self.vmfd, self.irq_ioctl, @ptrToInt(&event));
@@ -696,7 +711,7 @@ pub const Kvm = struct {
         try send_ioctl(self.vmfd, KVM_CREATE_IRQCHIP, 0);
 
         // Initialize in-kernel PIT device emulation
-        const pit = mem.zeroes(kvm_pit_config);
+        const pit = std.mem.zeroes(KvmPitConfig);
         try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
     }
 
@@ -726,19 +741,19 @@ pub const Kvm = struct {
         try send_ioctl(self.vcpufd, KVM_SET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
     }
 
-    fn set_irqchip(self: *Self, chip: *const kvm_irqchip) !void {
+    fn set_irqchip(self: *Self, chip: *const KvmIrqChip) !void {
         try send_ioctl(self.vmfd, KVM_SET_IRQCHIP, @ptrToInt(chip));
     }
 
-    fn get_irqchip(self: *Self, irqchip: u32) !kvm_irqchip {
-        var chip = std.mem.zeroInit(kvm_irqchip, .{ .chip_id = irqchip });
+    fn get_irqchip(self: *Self, irqchip: u32) !KvmIrqChip {
+        var chip = std.mem.zeroInit(KvmIrqChip, .{ .chip_id = irqchip });
         try send_ioctl(self.vmfd, KVM_GET_IRQCHIP, @ptrToInt(&chip));
         return chip;
     }
 
     pub fn get_klapic(ctx: *anyopaque) !LapicState {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
-        var lapic_state = LapicState{ .kvm_lapic = std.mem.zeroes(kvm_lapic_state) };
+        var lapic_state = LapicState{ .kvm_lapic = std.mem.zeroes(KvmLapicState) };
         try send_ioctl(self.vcpufd, KVM_GET_LAPIC, @ptrToInt(&lapic_state.kvm_lapic));
         return lapic_state;
     }
@@ -773,7 +788,7 @@ pub const Kvm = struct {
             .size = self.vm.vm_mem_size,
             .phys_addr = 0x0,
             .mem = @ptrToInt(self.vm.vm_mem_ptr.ptr),
-        }) catch fatal("unable to create memory slot for vm\n", .{});
+        }) catch |err| fatal("unable to add memory slot for vm: {}\n", .{err});
 
         self.add_mem_slot(.{
             .slot = 1,
@@ -781,7 +796,7 @@ pub const Kvm = struct {
             .size = self.vm.fw_mem_size,
             .phys_addr = 0xffff0000,
             .mem = @ptrToInt(self.vm.vm_mem_ptr.ptr) + self.vm.fw_phys_mem_area,
-        }) catch fatal("unable to create memory slot for firmware\n", .{});
+        }) catch |err| fatal("unable to add memory slot for firmware: {}\n", .{err});
 
         if (self.check_kvm_ext(KVM_CAP_IRQ_INJECT_STATUS)) {
             self.irq_ioctl = KVM_IRQ_LINE_STATUS;
@@ -790,16 +805,17 @@ pub const Kvm = struct {
         // Create an in-kernel IRQ chip to support emulation of IOAPIC, PIC, and etc.
         // The KVM_CREATE_IRQCHIP ioctl command initializes and configures
         // PIC and I/O APIC to provide emulation of an interrupt controller.
-        self.setup_kvm_interrupt() catch |err| fatal("unable to set-up KVM based Interrupt Controller: {}\n", .{err});
+        self.setup_kvm_interrupt() catch |err| fatal("unable to initialize interrupt controller in accelerator: {}\n", .{err});
 
-        self.vcpufd = try self.create_vcpu();
-        const last_vcpu_id = if (self.vm.vcpu_state.getLastOrNull()) |vcpu| vcpu.cpu_id + 1 else 1;
-        try self.vm.vcpu_state.append(zig_vm.VcpuState{
+        self.vcpufd = self.create_vcpu() catch |err| fatal("unable to create vcpu in accelerator: {}\n", .{err});
+        const last_vcpu_id = if (self.vcpu_state.getLastOrNull()) |vcpu| vcpu.cpu_id + 1 else 1;
+        try self.vcpu_state.append(VcpuState{
             .cpu_id = last_vcpu_id,
-            .msrs = std.ArrayList(zig_vm.MsrEntry).init(allocator),
+            .msrs = std.ArrayList(MsrEntry).init(allocator),
+            .vcpufd = self.vcpufd,
         });
 
-        self.setup_vcpu_mem() catch |err| fatal("unable to initialize vcpu memory area: {}", .{err});
+        self.vcpu_run = self.setup_vcpu_mem(self.vcpufd) catch |err| fatal("unable to create memory for vcpu: {}\n", .{err});
 
         const initrd_file = if (config.initrd) |filename| try utils.read_file(allocator, filename) else null;
         const kernel_file = try utils.read_file(allocator, config.kernel);

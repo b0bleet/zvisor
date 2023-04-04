@@ -28,7 +28,7 @@ const AccelApic = struct {
     get_klapic_reg: *const fn (*anyopaque, *LapicState, u32) u32,
     set_klapic_reg: *const fn (*anyopaque, *LapicState, u32, u32) void,
     set_klapic: *const fn (*anyopaque, *LapicState) anyerror!void,
-    setup_ioapic: *const fn (*anyopaque) anyerror!void,
+    setup_ioapic: *const fn (*anyopaque) anyerror!bool,
 };
 
 const AccelVTable = struct {

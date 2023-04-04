@@ -1,5 +1,6 @@
 const vm = @import("zvisor.zig");
 const std = @import("std");
+const log = std.log.scoped(.interrupt);
 const Accel = vm.Accel;
 
 pub const APIC_LVT0 = 0x35;
@@ -25,7 +26,9 @@ pub const InterruptManager = struct {
     pub fn setup_apic(self: *@This()) !void {
         const vcpu = self.accel.vtable;
         const apic = vcpu.apic orelse return;
-        try apic.setup_ioapic(self.accel.ptr);
+        const setup_ioapic = try apic.setup_ioapic(self.accel.ptr);
+        if (setup_ioapic) return;
+        log.warn("Accelerator based IrqChip isn't supported", .{});
     }
 
     pub fn trigger(self: *@This(), irq: u32, level: u32) !void {

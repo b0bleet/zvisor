@@ -5,6 +5,7 @@ const c_kvm = @import("root").c_kvm;
 const utils = @import("utils.zig");
 const io = @import("io.zig");
 const zig_vm = @import("zvisor.zig");
+const log = std.log.scoped(.kvm);
 const fatal = utils.fatal;
 const assert = std.debug.assert;
 
@@ -56,6 +57,7 @@ const KVM_IRQ_LINE = c_kvm.KVM_IRQ_LINE;
 const KVM_IRQ_LINE_STATUS = c_kvm.KVM_IRQ_LINE_STATUS;
 const KVM_CAP_IRQ_INJECT_STATUS = c_kvm.KVM_CAP_IRQ_INJECT_STATUS;
 const KVM_IRQCHIP_IOAPIC = c_kvm.KVM_IRQCHIP_IOAPIC;
+const KVM_CAP_IRQCHIP = c_kvm.KVM_CAP_IRQCHIP;
 
 // hacky way to call `KVM_GET_IRQCHIP/KVM_SET_IRQCHIP` ioctl command with modified `kvm_irqchip`
 const KVM_GET_IRQCHIP = c_kvm._IOWR(c_kvm.KVMIO, @as(c_int, 0x62), KvmIrqChip);
@@ -354,6 +356,7 @@ pub const Kvm = struct {
         var mode: os.mode_t = 0;
         const fd = try os.open("/dev/kvm", flags, mode);
         errdefer os.close(fd);
+
         return std.mem.zeroInit(Kvm, .{
             .allocator = allocator,
             .kvmfd = fd,
@@ -486,7 +489,7 @@ pub const Kvm = struct {
         try send_ioctl(self.vcpufd, KVM_SET_REGS, @ptrToInt(&regs));
     }
 
-    fn setup_linux_boot(self: *Self, kernel: []u8, initrd: ?[]u8, cmdline: ?[]u8) void {
+    fn setup_linux_boot(self: *Self, config: *const Config) anyerror!void {
         const e820map = extern struct {
             addr: u64 align(1),
             size: u64 align(1),
@@ -508,6 +511,12 @@ pub const Kvm = struct {
             mem_map: [MaxE820Entries]e820map,
         };
         comptime assert(@sizeOf(boot_config) <= 0x10000);
+
+        const initrd = if (config.initrd) |filename| try utils.read_file(self.allocator, filename) else null;
+        const kernel = try utils.read_file(self.allocator, config.kernel);
+        defer self.allocator.free(kernel);
+
+        const cmdline = config.cmdline;
 
         const linux_config_phys: u18 = 0x30000;
         var cmdline_size: u32 = if (cmdline) |cmd| @intCast(u32, (cmd.len + 16) & ~@as(u8, 15)) else 0;
@@ -613,6 +622,7 @@ pub const Kvm = struct {
 
         assert(prot_addr < self.vm.vm_mem_size);
         const kernel_area = @intToPtr([*]u8, @ptrToInt(self.vm.vm_mem_ptr.ptr) + prot_addr);
+        assert(kernel_size < self.vm.vm_mem_size);
         @memcpy(kernel_area, @intToPtr([*]u8, (@ptrToInt(kernel.ptr) + setup_size)), kernel_size);
 
         // e820 memory mapping initialization
@@ -715,10 +725,15 @@ pub const Kvm = struct {
         try send_ioctl(self.vmfd, KVM_CREATE_PIT2, @ptrToInt(&pit));
     }
 
-    fn setup_ioapic(ctx: *anyopaque) !void {
+    fn setup_ioapic(ctx: *anyopaque) !bool {
         const self = @ptrCast(*Kvm, @alignCast(@alignOf(Kvm), ctx));
-        const ioapic = try self.get_irqchip(KVM_IRQCHIP_IOAPIC);
-        try self.set_irqchip(&ioapic);
+        if (self.check_kvm_ext(KVM_CAP_IRQCHIP)) {
+            const ioapic = try self.get_irqchip(KVM_IRQCHIP_IOAPIC);
+            try self.set_irqchip(&ioapic);
+            return true;
+        }
+
+        return false;
     }
 
     fn get_klapic_reg(_: *anyopaque, lapic_state: *LapicState, reg: u32) u32 {
@@ -817,10 +832,7 @@ pub const Kvm = struct {
 
         self.vcpu_run = self.setup_vcpu_mem(self.vcpufd) catch |err| fatal("unable to create memory for vcpu: {}\n", .{err});
 
-        const initrd_file = if (config.initrd) |filename| try utils.read_file(allocator, filename) else null;
-        const kernel_file = try utils.read_file(allocator, config.kernel);
-        defer allocator.free(kernel_file);
-        self.setup_linux_boot(kernel_file, initrd_file, config.cmdline);
+        try self.setup_linux_boot(config);
         try self.init_fw_regs();
     }
 };

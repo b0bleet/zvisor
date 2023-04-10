@@ -26,8 +26,8 @@ pub const InterruptManager = struct {
     pub fn setup_apic(self: *@This()) !void {
         const vcpu = self.accel.vtable;
         const apic = vcpu.apic orelse return;
-        const setup_ioapic = try apic.setup_ioapic(self.accel.ptr);
-        if (setup_ioapic) return;
+        const accel_interrupt = try apic.setup_ioapic(self.accel.ptr);
+        if (accel_interrupt) return;
         log.warn("Accelerator based IrqChip isn't supported", .{});
     }
 

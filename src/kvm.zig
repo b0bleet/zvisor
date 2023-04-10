@@ -681,7 +681,8 @@ pub const Kvm = struct {
                 },
                 .Io => exit_io: {
                     const io_data = @intToPtr([*]u8, @ptrToInt(zv_run) + zv_run.u_flds.io.data_offset);
-                    self.vm.dev_manager.handle_io_req(
+                    self.vm.dev_manager.handle_dev_req(
+                        io.IoDevType.Pmmio,
                         @intToEnum(io.IoReqType, zv_run.u_flds.io.direction),
                         zv_run.u_flds.io.port,
                         io_data,
@@ -690,7 +691,8 @@ pub const Kvm = struct {
                     break :exit_io;
                 },
                 .Mmio => {
-                    self.vm.dev_manager.handle_mmio_req(
+                    self.vm.dev_manager.handle_dev_req(
+                        io.IoDevType.Mmio,
                         @intToEnum(io.IoReqType, zv_run.u_flds.mmio.is_write),
                         zv_run.u_flds.mmio.phys_addr,
                         &zv_run.u_flds.mmio.data,

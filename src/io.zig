@@ -19,6 +19,11 @@ const InterruptController = interrupt_controller.InterruptController;
 
 pub extern fn cfmakeraw(*std.os.termios) void;
 
+pub const IoDevType = enum {
+    Mmio,
+    Pmmio,
+};
+
 pub const IoReqType = enum {
     Read,
     Write,
@@ -139,15 +144,26 @@ pub const DeviceManager = struct {
         }
     }
 
-    pub fn handle_io_req(self: *@This(), reqtype: IoReqType, port: u16, data: [*]u8, size: usize) anyerror!void {
-        if (self.io_bus.find_dev(port)) |dev| {
-            try self.io_bus.handle_dev(port, dev, reqtype, data, size);
-        }
-    }
-
-    pub fn handle_mmio_req(self: *@This(), reqtype: IoReqType, addr: u64, data: [*]u8, len: usize) anyerror!void {
-        if (self.mmio_bus.find_dev(addr)) |dev| {
-            try self.mmio_bus.handle_dev(addr, dev, reqtype, data, len);
+    pub fn handle_dev_req(
+        self: *@This(),
+        devtype: IoDevType,
+        reqtype: IoReqType,
+        addr: u64,
+        data: [*]u8,
+        len: usize,
+    ) anyerror!void {
+        switch (devtype) {
+            .Mmio => {
+                if (self.mmio_bus.find_dev(addr)) |dev| {
+                    try self.mmio_bus.handle_dev(addr, dev, reqtype, data, len);
+                }
+            },
+            .Pmmio => {
+                const port = @intCast(u16, addr);
+                if (self.io_bus.find_dev(port)) |dev| {
+                    try self.io_bus.handle_dev(port, dev, reqtype, data, len);
+                }
+            },
         }
     }
 

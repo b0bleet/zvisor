@@ -6,6 +6,7 @@ const vfio_pci = @import("devices/vfio_pci.zig");
 const console_controller = @import("console_controller.zig");
 const interrupt_controller = @import("devices/interrupt_controller.zig");
 const interrupt = @import("interrupt.zig");
+const log = std.log.scoped(.io);
 const InterruptManager = interrupt.InterruptManager;
 const assert = std.debug.assert;
 const expect = std.testing.expect;
@@ -140,7 +141,7 @@ pub const DeviceManager = struct {
             self.console_handle = console.*;
             try console.start_thread();
         } else {
-            std.debug.print("unable to initialize console manager\n", .{});
+            log.warn("unable to initialize console manager\n", .{});
         }
     }
 

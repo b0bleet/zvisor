@@ -70,7 +70,7 @@ pub const VmRunErr = error{
     FailGetRegs,
 };
 
-const ZVisorExit = enum {
+const ZvisorExit = enum {
     Unknown,
     Exception,
     Io,
@@ -455,7 +455,7 @@ pub const Kvm = struct {
 
                 if (cpuids.items.len > 0) {
                     if (!self.patch_kvm_cpuid(cpuids, kvm_cpuids)) {
-                        std.debug.print("unable to find cpuid entry to patch\n", .{});
+                        log.warn("unable to find cpuid entry to patch\n", .{});
                     }
                 }
 
@@ -674,9 +674,9 @@ pub const Kvm = struct {
             const exit_reason = run.exit_reason;
             var regs = self.get_regs() catch return error.FailGetRegs;
             const zv_run = @ptrCast(*KvmRun, @alignCast(@alignOf(KvmRun), run));
-            switch (@intToEnum(ZVisorExit, exit_reason)) {
+            switch (@intToEnum(ZvisorExit, exit_reason)) {
                 .Hlt => {
-                    std.debug.print("HLT instruction executed {x}\n", .{regs.rip});
+                    log.warn("HLT instruction executed {x}\n", .{regs.rip});
                     break :vm_run;
                 },
                 .Io => exit_io: {
@@ -701,7 +701,7 @@ pub const Kvm = struct {
                 },
                 .Shutdown => {},
                 else => {
-                    std.debug.print("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
+                    log.warn("Unknown exit reason {d} {x}\n", .{ exit_reason, regs.rip });
                     unreachable;
                 },
             }

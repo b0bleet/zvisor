@@ -40,7 +40,7 @@ pub const ConsoleController = struct {
                 }
                 return null;
             },
-            else => unreachable,
+            else => @panic("unsupported file mode for console device"),
         };
 
         switch (builtin.os.tag) {

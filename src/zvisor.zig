@@ -9,6 +9,7 @@ const c_kvm = @import("root").c_kvm;
 const OS = utils.OS;
 const Config = @import("root").Config;
 
+const log = std.log.scoped(.zvisor);
 const assert = std.debug.assert;
 const fatal = utils.fatal;
 const fs = std.fs;
@@ -194,12 +195,10 @@ pub const Vm = struct {
         self.intr_manager = try interrupt.InterruptManager.init(&accel, allocator);
         errdefer allocator.destroy(self.intr_manager);
         const vcpu = accel.vtable;
-        if (vcpu.apic != null) {
-            try interrupt.set_lint(&accel);
-            try self.intr_manager.setup_apic();
-        } else {
-            std.debug.print("unable to initialize apic\n", .{});
+        if (vcpu.apic == null) {
+            log.warn("unable to initialize accelerator APIC\n", .{});
         }
+        try self.intr_manager.setup_apic();
 
         try self.prep_cpuid(allocator, &accel);
 
